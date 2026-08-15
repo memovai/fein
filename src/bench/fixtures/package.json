@@ -1,0 +1,6 @@
+{
+  "name": "fixture-app",
+  "version": "1.0.0",
+  "devDependencies": { "typescript": "5.7.2", "vitest": "2.1.8" },
+  "dependencies": { "lodash": "4.17.21", "zod": "3.23.8" }
+}

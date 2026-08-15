@@ -1,0 +1,25 @@
+# Build output
+dist/
+
+# Dependencies
+node_modules/
+
+# Runtime state, not source.
+#
+# `.fein/` holds whatever a *run* produced — sessions.db, jobs.db, spilled tool
+# output. It is per-machine and often large, and committing it would also
+# publish transcripts of real work. Skills and hooks live here too and are
+# genuinely worth sharing, so those are re-included below.
+.fein/*
+!.fein/skills/
+!.fein/hooks/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Logs and scratch
+*.log
+npm-debug.log*

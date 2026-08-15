@@ -1,0 +1,28 @@
+{
+  "name": "fein",
+  "version": "0.1.0",
+  "description": "FE!N: the world's first hybrid local-and-cloud agent harness you'll find addictive.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "bin": {
+    "fein": "dist/cli/main.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && mkdir -p dist/bench && cp -R src/bench/fixtures dist/bench/",
+    "demo": "npm run build --silent && node dist/cli/main.js demo",
+    "chat": "npm run build --silent && node dist/cli/main.js chat",
+    "test": "npm run build --silent && node --test \"dist/test/*.test.js\"",
+    "bench": "npm run build --silent && node dist/bench/run.js --scripted",
+    "bench:live": "npm run build --silent && node dist/bench/run.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  },
+  "author": "Ziboyan Wang"
+}
