@@ -1,4 +1,4 @@
-# FE!N
+# FEIN(FE!N): Hybrid local-and-cloud agent harness.
 
 **The world's first hybrid local-and-cloud agent harness you'll find addictive.**
 

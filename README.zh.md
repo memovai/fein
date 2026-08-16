@@ -1,4 +1,4 @@
-# FE!N
+# FEIN(FE!N): 本地与云端混合的 agent harness。
 
 **世界上第一个本地与云端混合、让人上瘾的 agent harness。**
 
