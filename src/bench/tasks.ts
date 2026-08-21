@@ -69,6 +69,18 @@ export const TASKS: BenchTask[] = [
     },
   },
   {
+    id: "circling",
+    exercises: "stuck-shaped — the same call repeated until the guard fires (escalation's case)",
+    prompt:
+      "Where is the retry budget enforced, and what is the cap? Answer with the file and the number.",
+    check: (a) => {
+      const problems: string[] = [];
+      if (!has(a, "server.ts")) problems.push("did not name the file");
+      if (!/\b3\b|\bthree\b/i.test(a)) problems.push("did not report the cap");
+      return problems.length ? `${problems.join("; ")} — got: ${trim(a)}` : undefined;
+    },
+  },
+  {
     id: "dep-version",
     exercises: "control — no mechanism should help; overhead shows here",
     prompt:

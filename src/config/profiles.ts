@@ -117,34 +117,28 @@ export function buildRouter(cfg: FeinConfig): Router {
     if (obj?.policy) {
       const p = obj.policy;
       switch (p.kind) {
+        // Policy targets are reachable through the policy's own declared
+        // ports (RoutePolicy.ports), NOT by appending them to the fallback
+        // chain: a fallback is where a transient throw lands, and a silent
+        // mid-epoch hop onto the restart/escalation target is exactly what
+        // these policies exist to prevent.
         case "escalate-on-stuck": {
           const restartTo = p.restartTo !== undefined ? resolve(slot, p.restartTo) : undefined;
           policy = escalateOnStuck({
             ...(p.thinking ? { ladder: p.thinking } : {}),
             ...(restartTo ? { restartTo } : {}),
           });
-          if (restartTo && restartTo !== primary && !fallbacks.includes(restartTo)) {
-            fallbacks.push(restartTo);
-          }
           break;
         }
-        case "escalate-on-reject": {
-          const to = resolve(slot, p.to);
-          policy = escalateOnReject({ to });
-          // The router refuses a policy that picks a port outside the declared
-          // chain, so the target must be reachable as a fallback.
-          if (to !== primary && !fallbacks.includes(to)) fallbacks.push(to);
+        case "escalate-on-reject":
+          policy = escalateOnReject({ to: resolve(slot, p.to) });
           break;
-        }
-        case "right-size": {
-          const small = resolve(slot, p.small);
+        case "right-size":
           policy = rightSize({
-            small,
+            small: resolve(slot, p.small),
             ...(p.maxInputTokens !== undefined ? { maxInputTokens: p.maxInputTokens } : {}),
           });
-          if (small !== primary && !fallbacks.includes(small)) fallbacks.push(small);
           break;
-        }
       }
     }
 

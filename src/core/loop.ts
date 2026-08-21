@@ -5,7 +5,7 @@ import { Ledger } from "../telemetry/ledger.js";
 import { Router } from "../models/router.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { defaultTools } from "../tools/builtin.js";
-import { digest, DEFAULT_DIGEST_POLICY, type DigestPolicy } from "../steps/observe.js";
+import { digest, DEFAULT_DIGEST_POLICY, type DigestPolicy, type DigestOutcome } from "../steps/observe.js";
 import {
   spill,
   FileSpillStore,
@@ -405,6 +405,12 @@ export class Agent {
    * that ticks somewhere inside a turn tells nobody anything.
    */
   async run(userInput: string, signal?: AbortSignal): Promise<RunResult> {
+    // Per-run routing signals reset here: a restart earned on a previous
+    // run's final turn (which never reaches maybeCompact) must not leak into
+    // this one and force-compact the prefix the keeper kept warm.
+    this.restartRequested = false;
+    this.stuckCount = 0;
+
     // Two concurrent runs would interleave writes to the transcript, making
     // message order depend on scheduling — which breaks prefix monotonicity and
     // therefore the cache, intermittently and undebuggably. Steering exists
@@ -710,11 +716,24 @@ export class Agent {
     // digest of a truncated preview would summarize the truncation, and a
     // preview of a digest would slice a summary. They are two independent
     // views of the same original, and the lens picks between them.
-    const [spills, digests] = await Promise.all([
+    // Digests of the SAME tool run sequentially: the per-tool reject memory's
+    // check-then-act must not interleave (three concurrent rejects would all
+    // pass the limit check before any of them counts), and its final state
+    // must not depend on completion order. Different tools still run
+    // concurrently, and spill runs alongside everything.
+    const digests: DigestOutcome[] = new Array(resolved.length);
+    const byTool = new Map<string, number[]>();
+    resolved.forEach((r, i) => {
+      const group = byTool.get(r.toolName);
+      if (group) group.push(i);
+      else byTool.set(r.toolName, [i]);
+    });
+    const [spills] = await Promise.all([
       Promise.all(resolved.map((r) => this.maybeSpill(r.result, r.toolName))),
-      Promise.all(
-        resolved.map((r) =>
-          digest({
+      ...[...byTool.values()].map(async (indices) => {
+        for (const i of indices) {
+          const r = resolved[i]!;
+          digests[i] = await digest({
             router: this.router,
             ledger: this.ledger,
             transcript: this.transcript,
@@ -723,9 +742,9 @@ export class Agent {
             policy: this.digestPolicy,
             rejects: this.digestRejects,
             ...(signal !== undefined ? { signal } : {}),
-          }),
-        ),
-      ),
+          });
+        }
+      }),
     ]);
 
     for (let i = 0; i < resolved.length; i++) {
@@ -912,7 +931,7 @@ export class Agent {
     // The summary is written by the *pre-restart* binding on purpose: the old
     // port reads the context it already has cached at the cached-read rate; a
     // new port would pay full price to read history it is about to discard.
-    const { result, port: sPort } = await this.router.run(
+    const { result, port: sPort, decision: sDecision } = await this.router.run(
       summarySlot,
       {
         system:
@@ -922,11 +941,19 @@ export class Agent {
         messages,
         maxTokens: 1500,
         temperature: 0,
+        // A mechanical temperature-0 summary needs no reasoning budget; without
+        // this pin, a stuck run's escalation ladder would bill top-rung
+        // thinking on the very call that exists to save tokens.
+        thinking: "off",
       },
       undefined,
-      summarySlot === this.thinkSlot ? this.thinkHints() : undefined,
+      // Epoch facts only: they select the correct post-restart port. The
+      // stuck pressure is deliberately withheld — see the thinking pin above.
+      summarySlot === this.thinkSlot
+        ? { restartCount: this.restartCount, stuckBeforeRestart: this.stuckBeforeRestart }
+        : undefined,
     );
-    this.ledger.record(summarySlot, sPort.info, result);
+    this.ledger.record(summarySlot, sPort.info, result, undefined, sDecision);
 
     const reason = forced
       ? "routing policy requested a restart"

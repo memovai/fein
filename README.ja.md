@@ -12,7 +12,7 @@
 
 FE!N はループを **スロット** に分解し、それぞれに別のモデルを割り当てられるように
 した。フロンティアモデルが考え、手元の 3B モデルが読む。TypeScript 製、
-**ランタイム依存ゼロ**、テスト 182 本。
+**ランタイム依存ゼロ**、テスト 185 本。
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -319,7 +319,7 @@ src/
 ## テストとベンチマーク
 
 ```bash
-npm test               # 182 テスト
+npm test               # 185 テスト
 npm run bench          # オフライン・決定的・無料 — 仕組みのコスト
 npm run bench:live     # 実モデル — 正しさの検証
 ```

@@ -375,4 +375,12 @@ export interface RouteDecision {
  */
 export interface RoutePolicy {
   decide(binding: Binding, req: CompletionRequest, hints: RouteHints): RouteDecision;
+  /**
+   * Every port this policy may ever decide on, beyond the binding's own
+   * primary and fallbacks. Declared rather than discovered so the router can
+   * validate a decision against a closed set — and so a policy target is NOT
+   * silently reachable through the exception-fallback chain: a policy port is
+   * where deliberate decisions go, not where a transient timeout lands.
+   */
+  ports?: ModelPort[];
 }

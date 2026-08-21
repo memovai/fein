@@ -12,7 +12,7 @@ command are treated as one job, priced as one job, and sent to one model.
 
 FE!N splits the loop into **slots** and lets you bind a different model to each —
 so a frontier model does the thinking while a 3B model on your laptop does the
-reading. TypeScript, **zero runtime dependencies**, 182 tests.
+reading. TypeScript, **zero runtime dependencies**, 185 tests.
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -319,7 +319,7 @@ honest list of what is still unsolved.
 ## Tests and benchmark
 
 ```bash
-npm test               # 182 tests
+npm test               # 185 tests
 npm run bench          # offline, deterministic, free — mechanism cost
 npm run bench:live     # real models — the correctness question
 ```

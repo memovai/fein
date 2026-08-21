@@ -197,6 +197,71 @@ test("a repeatedly-dead primary is demoted, then probed for recovery", async () 
   assert.equal(after.cooledDown, undefined);
 });
 
+test("caller aborts are not port failures and stop the chain immediately", async () => {
+  let primaryAttempts = 0;
+  let fallbackAttempts = 0;
+  const primary = new ScriptedPort({
+    id: "primary",
+    locality: "cloud",
+    handler: () => {
+      primaryAttempts++;
+      throw new Error("aborted mid-request");
+    },
+  });
+  const fallback = new ScriptedPort({
+    id: "fallback",
+    locality: "cloud",
+    handler: () => {
+      fallbackAttempts++;
+      return { text: "ok" };
+    },
+  });
+  const router = new Router().bind("observe", primary, { fallbacks: [fallback] });
+
+  // Two aborted runs: the throw propagates, the fallback is never bothered.
+  for (let i = 0; i < 2; i++) {
+    const ac = new AbortController();
+    ac.abort();
+    await assert.rejects(router.run("observe", { system: "s", messages: [] }, ac.signal));
+  }
+  assert.equal(fallbackAttempts, 0, "a cancelled run does not shop around");
+
+  // And the healthy primary was not demoted by them: the next real call
+  // still tries it first.
+  primaryAttempts = 0;
+  const out = await router.run("observe", { system: "s", messages: [] });
+  assert.equal(primaryAttempts, 1, "no cooldown was earned by the aborts");
+  assert.equal(out.port.info.id, "fallback"); // primary still throws for real
+});
+
+test("the cooldown never demotes the port a policy pinned", async () => {
+  let strongAttempts = 0;
+  const local = new ScriptedPort({ id: "local", locality: "local", handler: () => ({ text: "meh" }) });
+  const strong = new ScriptedPort({
+    id: "strong",
+    locality: "cloud",
+    handler: () => {
+      strongAttempts++;
+      throw new Error("overloaded");
+    },
+  });
+  const router = new Router().bind("observe", local, {
+    fallbacks: [strong],
+    policy: escalateOnReject({ to: strong }),
+  });
+  const rejectHints = { pressure: "reject" as const, pressureCount: 1 };
+
+  // strong earns a cooldown by failing twice while pinned (local absorbs).
+  await router.run("observe", { system: "s", messages: [] }, undefined, rejectHints);
+  await router.run("observe", { system: "s", messages: [] }, undefined, rejectHints);
+  assert.equal(strongAttempts, 2);
+
+  // Cooled down or not, a pinned port is always attempted first: the decision
+  // is the record, and quietly serving elsewhere would make the trace lie.
+  await router.run("observe", { system: "s", messages: [] }, undefined, rejectHints);
+  assert.equal(strongAttempts, 3, "the pin overrides the cooldown");
+});
+
 test("a chain of one never cools down — last resort beats no resort", async () => {
   let attempts = 0;
   const only = new ScriptedPort({
@@ -339,9 +404,14 @@ test("config object form binds a policy and keeps its target reachable", () => {
   const ob = router.binding("observe");
   assert.ok(ob.policy);
   assert.equal(
-    ob.fallbacks?.some((p) => p.info.id === "cloud"),
-    true,
-    "the policy target is appended as a fallback so the router accepts it",
+    ob.fallbacks?.some((p) => p.info.id === "cloud") ?? false,
+    false,
+    "the policy target must NOT leak into the exception-fallback chain",
+  );
+  assert.deepEqual(
+    ob.policy.ports?.map((p) => p.info.id),
+    ["cloud"],
+    "it is reachable through the policy's declared ports instead",
   );
   assert.equal(router.portFor("observe").info.id, "local");
   assert.equal(router.portFor("observe", { pressure: "reject" }).info.id, "cloud");
@@ -355,17 +425,18 @@ test("config object form binds a policy and keeps its target reachable", () => {
     /unknown port "nope"/,
   );
 
-  // restartTo resolves and lands in the fallback chain so the router accepts
-  // the post-restart route.
+  // restartTo resolves into the policy's declared ports — not the fallback
+  // chain — and the post-restart route reaches it.
   const restart = buildRouter({
     ports: cfg.ports,
     bind: {
       think: { port: "local", policy: { kind: "escalate-on-stuck", restartTo: "cloud" } },
     },
   });
-  assert.equal(
-    restart.binding("think").fallbacks?.some((p) => p.info.id === "cloud"),
-    true,
+  assert.equal(restart.binding("think").fallbacks, undefined);
+  assert.deepEqual(
+    restart.binding("think").policy?.ports?.map((p) => p.info.id),
+    ["cloud"],
   );
   assert.equal(
     restart.portFor("think", { restartCount: 1, stuckBeforeRestart: 5 }).info.id,
@@ -373,15 +444,66 @@ test("config object form binds a policy and keeps its target reachable", () => {
   );
 });
 
-test("a policy may not route to an undeclared port", async () => {
+test("a policy may not route outside its declared world", async () => {
   const a = new ScriptedPort({ id: "a", locality: "cloud", handler: () => ({ text: "" }) });
   const stranger = new ScriptedPort({ id: "stranger", locality: "cloud", handler: () => ({ text: "" }) });
-  const router = new Router().bind("observe", a, { policy: escalateOnReject({ to: stranger }) });
+  // A hand-rolled policy that decides on a port it never declared.
+  const rogue = { decide: () => ({ port: stranger, reason: "trust me" }) };
+  const router = new Router().bind("observe", a, { policy: rogue });
 
   await assert.rejects(
-    router.run("observe", { system: "s", messages: [] }, undefined, { pressure: "reject" }),
-    /neither the primary nor a declared fallback/,
+    router.run("observe", { system: "s", messages: [] }),
+    /neither the primary, a declared fallback, nor in the policy's declared ports/,
   );
+
+  // The shipped factories declare their targets, so the same shape is legal —
+  // and the target is reachable ONLY through a decision, never via the
+  // exception-fallback chain.
+  const declared = new Router().bind("observe", a, { policy: escalateOnReject({ to: stranger }) });
+  const out = await declared.run(
+    "observe",
+    { system: "s", messages: [] },
+    undefined,
+    { pressure: "reject" },
+  );
+  assert.equal(out.port.info.id, "stranger");
+});
+
+test("a policy target is not reachable through the exception-fallback chain", async () => {
+  // The dangerous shape the review caught: think bound with a restart target
+  // and no fallbacks. One transient throw of the primary must FAIL the call,
+  // not silently serve it on the restart target mid-epoch.
+  let strongCalls = 0;
+  const weak = new ScriptedPort({
+    id: "weak",
+    locality: "cloud",
+    handler: () => {
+      throw new Error("transient 429");
+    },
+  });
+  const strong = new ScriptedPort({
+    id: "strong",
+    locality: "cloud",
+    handler: () => {
+      strongCalls++;
+      return { text: "should not serve" };
+    },
+  });
+  const router = new Router().bind("think", weak, {
+    policy: escalateOnStuck({ ladder: ["high"], restartTo: strong }),
+  });
+
+  await assert.rejects(router.run("think", { system: "s", messages: [] }), /transient 429/);
+  assert.equal(strongCalls, 0, "a throw is not a decision — the restart target stays untouched");
+
+  // But an earned restart reaches it deliberately.
+  const earned = await router.run(
+    "think",
+    { system: "s", messages: [] },
+    undefined,
+    { restartCount: 1, stuckBeforeRestart: 2 },
+  );
+  assert.equal(earned.port.info.id, "strong");
 });
 
 

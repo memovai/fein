@@ -54,8 +54,20 @@ export class Router {
    * not banished), and probed in front again every COOLDOWN_PROBE_EVERY
    * calls so a recovered runtime is noticed. Without this, every call to a
    * slot with a dead primary pays a doomed connection attempt first.
+   *
+   * Keyed by port instance across ALL slots on purpose: a dead runtime is a
+   * fact about the runtime, not about the slot that happened to notice — and
+   * one slot's success is real evidence the runtime is back for the others.
+   * Caller-initiated aborts never count as failures.
    */
   private failures = new Map<ModelPort, { consecutive: number; skips: number }>();
+
+  /** True when this port would be demoted by the cooldown on the next call. */
+  private cooled(port: ModelPort): boolean {
+    const f = this.failures.get(port);
+    if (!f || f.consecutive < COOLDOWN_AFTER_FAILS) return false;
+    return f.skips < COOLDOWN_PROBE_EVERY - 1;
+  }
 
   bind(slot: StepName, port: ModelPort, opts: Omit<Binding, "slot" | "port"> = {}): this {
     this.bindings.set(slot, { slot, port, ...opts });
@@ -86,8 +98,19 @@ export class Router {
    */
   portFor(slot: StepName, hints?: RouteHints): ModelPort {
     const b = this.binding(slot);
-    if (!b.policy) return b.port;
-    return b.policy.decide(b, { system: "", messages: [] }, hints ?? {}).port;
+    const decided = b.policy
+      ? b.policy.decide(b, { system: "", messages: [] }, hints ?? {}).port
+      : b.port;
+    // Reflect the cooldown, read-only: callers size work (chunk budgets,
+    // window gates) to this port, and budgeting for a port that run() will
+    // deterministically skip sends mis-sized work to the fallback. A policy
+    // decision is exempt below in run(), so it is exempt here too.
+    if (b.policy && decided !== b.port) return decided;
+    if (this.cooled(decided)) {
+      const alt = [b.port, ...(b.fallbacks ?? [])].find((p) => !this.cooled(p));
+      return alt ?? decided;
+    }
+    return decided;
   }
 
   async run(
@@ -103,14 +126,20 @@ export class Router {
     // invent ports. Escalation-by-exception below stays exactly as it was.
     let chain = alternates;
     let decision: RouteOutcome["decision"];
+    let pinned: ModelPort | undefined;
     if (b.policy) {
       const d = b.policy.decide(b, req, hints ?? {});
-      if (!alternates.includes(d.port)) {
+      // A policy may route only within its declared world: the binding's own
+      // chain plus the ports the policy registered up front. Policy targets
+      // are deliberately NOT merged into the exception-fallback chain — a
+      // deliberate decision is the only road to them, never a transient throw.
+      if (!alternates.includes(d.port) && !(b.policy.ports ?? []).includes(d.port)) {
         throw new Error(
           `policy for slot "${slot}" chose port "${d.port.info.id}", which is neither ` +
-            `the primary nor a declared fallback`,
+            `the primary, a declared fallback, nor in the policy's declared ports`,
         );
       }
+      if (d.port !== b.port) pinned = d.port;
       chain = [d.port, ...alternates.filter((p) => p !== d.port)];
       const escalated = d.port !== b.port || (d.thinking !== undefined && req.thinking === undefined);
       if (escalated || d.restart) {
@@ -130,6 +159,10 @@ export class Router {
     if (chain.length > 1) {
       const demoted: ModelPort[] = [];
       const kept = chain.filter((port) => {
+        // Never demote the port a policy just pinned: the decision is the
+        // record ("restarted on strong"), and quietly serving elsewhere would
+        // make the trace lie — and flip the think port mid-epoch.
+        if (port === pinned) return true;
         const f = this.failures.get(port);
         if (!f || f.consecutive < COOLDOWN_AFTER_FAILS) return true;
         if (f.skips >= COOLDOWN_PROBE_EVERY - 1) {
@@ -161,6 +194,9 @@ export class Router {
         this.failures.delete(port);
         return { result, port, attempts, decision, ...(cooledDown ? { cooledDown } : {}) };
       } catch (err) {
+        // A caller-initiated abort is not a port failure, and trying the next
+        // port against a cancelled run helps nobody: propagate immediately.
+        if (signal?.aborted) throw err;
         const f = this.failures.get(port) ?? { consecutive: 0, skips: 0 };
         f.consecutive++;
         this.failures.set(port, f);

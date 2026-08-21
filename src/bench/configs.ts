@@ -209,6 +209,20 @@ function scriptedThinker(
     return { text: hits.map((f) => `src/${f}`).join("\n") };
   }
 
+  // circling: deliberately stuck — the same read three times (same call, same
+  // result) trips the repeat guard, then the fourth turn answers. Every config
+  // pays the same wasted turns; what differs is whether anything *notices*:
+  // a bound escalate-on-stuck policy raises thinking on the post-guard turn,
+  // and the report's escalation column shows the mechanism firing at zero
+  // added cost. This is the only task where the adaptive arm's machinery
+  // actually engages offline.
+  if (prompt.includes("retry budget")) {
+    if (observations.length < 3) {
+      return { text: "", toolCalls: [call("read_file", { path: "src/server.ts" })] };
+    }
+    return { text: "The retry budget is enforced in src/server.ts, capped at 3 attempts." };
+  }
+
   // dep-version
   if (prompt.includes("typescript")) {
     if (!observations.length) return { text: "", toolCalls: [call("read_file", { path: "package.json" })] };

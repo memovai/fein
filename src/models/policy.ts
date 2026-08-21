@@ -67,7 +67,10 @@ export function escalateOnStuck(opts?: {
   const ladder = opts?.ladder ?? DEFAULT_LADDER;
   if (ladder.length === 0) throw new Error("escalateOnStuck: ladder must not be empty");
   const restartTo = opts?.restartTo;
+  const rungFor = (fires: number): ThinkingLevel =>
+    ladder[Math.max(Math.min(fires - 1, ladder.length - 1), 0)]!;
   return {
+    ...(restartTo ? { ports: [restartTo] } : {}),
     decide(binding: Binding, _req: CompletionRequest, hints: RouteHints) {
       // Post-restart: pinned to the stronger port for the whole epoch. The
       // condition is a ratchet over frozen values — it never un-switches.
@@ -76,18 +79,16 @@ export function escalateOnStuck(opts?: {
         (hints.restartCount ?? 0) >= 1 &&
         (hints.stuckBeforeRestart ?? 0) > ladder.length;
       if (restarted) {
-        const rung = Math.min((hints.pressureCount ?? 0) - 1, ladder.length - 1);
         return {
           port: restartTo,
-          ...(hints.pressure === "stuck" ? { thinking: ladder[Math.max(rung, 0)]! } : {}),
+          ...(hints.pressure === "stuck" ? { thinking: rungFor(hints.pressureCount ?? 1) } : {}),
           reason: `restarted on ${restartTo.info.id} after ${hints.stuckBeforeRestart} stuck fire(s)`,
         };
       }
 
       if (hints.pressure !== "stuck") return { port: binding.port, reason: "" };
       const fires = hints.pressureCount ?? 1;
-      const rung = Math.min(fires - 1, ladder.length - 1);
-      const thinking = ladder[Math.max(rung, 0)]!;
+      const thinking = rungFor(fires);
       const wantRestart = restartTo !== undefined && fires > ladder.length;
       return {
         port: binding.port,
@@ -109,6 +110,7 @@ export function escalateOnStuck(opts?: {
  */
 export function escalateOnReject(opts: { to: ModelPort }): RoutePolicy {
   return {
+    ports: [opts.to],
     decide(binding: Binding, _req: CompletionRequest, hints: RouteHints) {
       if (hints.pressure !== "reject") return { port: binding.port, reason: "" };
       return { port: opts.to, reason: `quality gate rejected ${binding.port.info.id}'s output` };
@@ -125,6 +127,7 @@ export function escalateOnReject(opts: { to: ModelPort }): RoutePolicy {
 export function rightSize(opts: { small: ModelPort; maxInputTokens?: number }): RoutePolicy {
   const threshold = opts.maxInputTokens ?? 1000;
   return {
+    ports: [opts.small],
     decide(binding: Binding, _req: CompletionRequest, hints: RouteHints) {
       const size = hints.approxInputTokens;
       if (size === undefined || size > threshold) return { port: binding.port, reason: "" };
