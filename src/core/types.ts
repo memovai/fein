@@ -334,6 +334,15 @@ export interface RouteHints {
   pressureCount?: number;
   /** Estimated input size, for right-sizing trivially small requests. */
   approxInputTokens?: number;
+  /**
+   * Epoch restarts (compactions) this run. Frozen between restarts, which is
+   * what lets a policy switch ports at an epoch boundary and provably never
+   * mid-epoch: a decision that depends only on this and `stuckBeforeRestart`
+   * is constant for the whole epoch.
+   */
+  restartCount?: number;
+  /** Total guard fires recorded up to the most recent restart. Frozen with it. */
+  stuckBeforeRestart?: number;
 }
 
 /** What a policy decided, recorded verbatim in the trace and ledger. */
@@ -344,6 +353,14 @@ export interface RouteDecision {
   thinking?: ThinkingLevel;
   /** Human-readable rationale; empty string means the default route. */
   reason: string;
+  /**
+   * The policy wants an epoch restart at the next turn boundary — the one
+   * moment a think-model swap is free (the summary restart pays the cache
+   * cost anyway, and no opaque reasoning survives it). A request, not an
+   * action: the loop honors it by compacting early; the policy itself never
+   * mutates anything.
+   */
+  restart?: boolean;
 }
 
 /**

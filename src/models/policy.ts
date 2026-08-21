@@ -39,28 +39,63 @@ import type {
 const DEFAULT_LADDER: ThinkingLevel[] = ["medium", "high"];
 
 /**
- * Escalate the think model's *effort*, never its port, when the loop guard
- * reports the model going in circles. First fire gets ladder[0], second
- * ladder[1], and so on, saturating at the top rung.
+ * Escalate the think model's *effort*, never its port mid-epoch, when the
+ * loop guard reports the model going in circles. First fire gets ladder[0],
+ * second ladder[1], and so on, saturating at the top rung.
  *
  * Raising `thinking` keeps the port — and therefore the replayed prefix —
  * identical, so the system/tools prefix stays cached and PrefixGuard (which
  * checks message content, not request params) raises no false alarms.
  * Anthropic message-level breakpoints behind changed request params may still
  * re-write: cheap, not free.
+ *
+ * With `restartTo`, the ladder gains a top: once every rung is spent and the
+ * guard fires again, the decision carries `restart: true` — a request that
+ * the loop compact early and restart the epoch from a plain-text summary.
+ * That boundary is the one place a think-model swap is free (the restart
+ * pays the cache cost anyway, and the lens replays no opaque reasoning across
+ * an epoch), so after the restart the policy routes to `restartTo` for the
+ * whole new epoch. The switch condition reads only epoch-frozen hints
+ * (`restartCount`, `stuckBeforeRestart`), so it provably cannot flip
+ * mid-epoch. With the default two-rung ladder the restart needs a third
+ * guard fire; bind a shorter ladder (e.g. `["high"]`) to reach it sooner.
  */
-export function escalateOnStuck(opts?: { ladder?: ThinkingLevel[] }): RoutePolicy {
+export function escalateOnStuck(opts?: {
+  ladder?: ThinkingLevel[];
+  restartTo?: ModelPort;
+}): RoutePolicy {
   const ladder = opts?.ladder ?? DEFAULT_LADDER;
   if (ladder.length === 0) throw new Error("escalateOnStuck: ladder must not be empty");
+  const restartTo = opts?.restartTo;
   return {
     decide(binding: Binding, _req: CompletionRequest, hints: RouteHints) {
+      // Post-restart: pinned to the stronger port for the whole epoch. The
+      // condition is a ratchet over frozen values — it never un-switches.
+      const restarted =
+        restartTo !== undefined &&
+        (hints.restartCount ?? 0) >= 1 &&
+        (hints.stuckBeforeRestart ?? 0) > ladder.length;
+      if (restarted) {
+        const rung = Math.min((hints.pressureCount ?? 0) - 1, ladder.length - 1);
+        return {
+          port: restartTo,
+          ...(hints.pressure === "stuck" ? { thinking: ladder[Math.max(rung, 0)]! } : {}),
+          reason: `restarted on ${restartTo.info.id} after ${hints.stuckBeforeRestart} stuck fire(s)`,
+        };
+      }
+
       if (hints.pressure !== "stuck") return { port: binding.port, reason: "" };
-      const rung = Math.min((hints.pressureCount ?? 1) - 1, ladder.length - 1);
+      const fires = hints.pressureCount ?? 1;
+      const rung = Math.min(fires - 1, ladder.length - 1);
       const thinking = ladder[Math.max(rung, 0)]!;
+      const wantRestart = restartTo !== undefined && fires > ladder.length;
       return {
         port: binding.port,
         thinking,
-        reason: `guard fired ${hints.pressureCount ?? 1}x -> thinking=${thinking}`,
+        reason:
+          `guard fired ${fires}x -> thinking=${thinking}` +
+          (wantRestart ? `; ladder spent, requesting restart on ${restartTo!.info.id}` : ""),
+        ...(wantRestart ? { restart: true } : {}),
       };
     },
   };

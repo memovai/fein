@@ -200,6 +200,12 @@ export class Agent {
   private readonly loopGuard: LoopGuard;
   /** Guard fires this run. Feeds "stuck" pressure to the think routing policy. */
   private stuckCount = 0;
+  /** Epoch restarts this run. Frozen between compactions; see RouteHints. */
+  private restartCount = 0;
+  /** stuckCount as of the most recent restart. Frozen with restartCount. */
+  private stuckBeforeRestart = 0;
+  /** A routing policy asked for an early epoch; honored at the next turn start. */
+  private restartRequested = false;
   /** The slot serving this agent's own turns. "think" unless the spawner said otherwise. */
   private readonly thinkSlot: StepName;
   private readonly bailOnStuck: boolean;
@@ -482,9 +488,14 @@ export class Agent {
 
   /** Pressure facts for the think binding's routing policy, if one is bound. */
   private thinkHints(): RouteHints {
-    return this.stuckCount > 0
-      ? { pressure: "stuck", pressureCount: this.stuckCount }
-      : {};
+    return {
+      ...(this.stuckCount > 0
+        ? { pressure: "stuck" as const, pressureCount: this.stuckCount }
+        : {}),
+      ...(this.restartCount > 0
+        ? { restartCount: this.restartCount, stuckBeforeRestart: this.stuckBeforeRestart }
+        : {}),
+    };
   }
 
   /** One model turn: render, ask, record. */
@@ -520,6 +531,7 @@ export class Agent {
       this.thinkHints(),
     );
     this.ledger.record(this.thinkSlot, port.info, result, prefix, decision);
+    if (decision?.restart) this.restartRequested = true;
     if (decision?.escalated) {
       this.onEvent({
         type: "route",
@@ -875,7 +887,9 @@ export class Agent {
    * many turns. Rare and expensive beats constant and cheap-looking.
    */
   private async maybeCompact(): Promise<void> {
-    const port = this.router.portFor(this.thinkSlot);
+    // Post-restart the routing policy may resolve a different port, so the
+    // window that gates compaction must be the port that will actually serve.
+    const port = this.router.portFor(this.thinkSlot, this.thinkHints());
     // A throwaway lens. `MainLens` freezes every event it renders, because
     // "already shown to the model" is what makes late digest substitution
     // unsafe (Rule 2). But this render is only a size estimate — it never
@@ -883,23 +897,44 @@ export class Agent {
     // the think model has not seen yet, and the digest would silently never apply.
     const messages = new MainLens(this.router.has("observe")).render(this.transcript);
     const approx = this.approxPromptTokens(messages);
-    if (approx < port.info.contextWindow * this.compactAt) return;
+    // A policy-requested restart compacts early: the swap it wants is only
+    // free at this boundary, and waiting for the size threshold would leave a
+    // stuck model grinding on a hot cache nobody wants to preserve.
+    const forced = this.restartRequested;
+    if (!forced && approx < port.info.contextWindow * this.compactAt) return;
 
     await this.hooks.beforeCompact(this.hookCtx(this.currentStep), approx);
 
     const summarySlot = this.router.has("observe") ? "observe" : this.thinkSlot;
-    const { result, port: sPort } = await this.router.run(summarySlot, {
-      system:
-        "Summarize this agent session so work can continue without the full transcript. " +
-        "Preserve: the user's goal, decisions made and why, files and commands touched with " +
-        "exact names, findings, and what remains to be done. Be specific. No preamble.",
-      messages,
-      maxTokens: 1500,
-      temperature: 0,
-    });
+    // The summary is written by the *pre-restart* binding on purpose: the old
+    // port reads the context it already has cached at the cached-read rate; a
+    // new port would pay full price to read history it is about to discard.
+    const { result, port: sPort } = await this.router.run(
+      summarySlot,
+      {
+        system:
+          "Summarize this agent session so work can continue without the full transcript. " +
+          "Preserve: the user's goal, decisions made and why, files and commands touched with " +
+          "exact names, findings, and what remains to be done. Be specific. No preamble.",
+        messages,
+        maxTokens: 1500,
+        temperature: 0,
+      },
+      undefined,
+      summarySlot === this.thinkSlot ? this.thinkHints() : undefined,
+    );
     this.ledger.record(summarySlot, sPort.info, result);
 
-    const reason = `context reached ${Math.round(this.compactAt * 100)}% of window`;
+    const reason = forced
+      ? "routing policy requested a restart"
+      : `context reached ${Math.round(this.compactAt * 100)}% of window`;
+
+    // The epoch boundary freezes the restart facts the routing policy reads.
+    // From here to the next epoch they are constants, which is what makes a
+    // policy port switch stable for the whole epoch.
+    this.restartRequested = false;
+    this.restartCount++;
+    this.stuckBeforeRestart = this.stuckCount;
 
     // With persistence, an epoch is a *fork*, not a truncation: the parent
     // session keeps every event, the child starts from the summary, and the
@@ -912,13 +947,13 @@ export class Agent {
       this.activeTranscript = child.transcript;
       this.onEvent({
         type: "epoch",
-        reason: `compacted at ~${approx} tokens → forked to ${child.id}`,
+        reason: `${reason} — compacted at ~${approx} tokens → forked to ${child.id}`,
       });
       return;
     }
 
     this.transcript.epoch(reason, result.text);
-    this.onEvent({ type: "epoch", reason: `compacted at ~${approx} tokens` });
+    this.onEvent({ type: "epoch", reason: `${reason} — compacted at ~${approx} tokens` });
   }
 
   /**

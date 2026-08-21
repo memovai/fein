@@ -10,7 +10,7 @@
 压缩 3000 行测试日志、拦住一条危险命令 —— 被当成一件事、按一件事计价、发给同一个模型。
 
 FE!N 把循环拆成 **slot**,让你给每个 slot 绑不同的模型:前沿模型负责思考,
-你笔记本上的 3B 模型负责阅读。TypeScript,**零运行时依赖**,177 个测试。
+你笔记本上的 3B 模型负责阅读。TypeScript,**零运行时依赖**,179 个测试。
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -85,9 +85,13 @@ Observation → `observe`。`verify` 和 `title` 则是 ReAct 没有的控制面
 会重新推导出同样的决定,而且每个决定都会落进 trace 和账本:
 
 - `escalate-on-stuck`(用于 `think`):循环守卫发现模型在绕圈 → 还是同一个 port,
-  但思考强度调高。绝不在会话中途换 port:prompt 缓存按模型分键,
-  而一个模型的签名推理块回放给另一个模型是供应商级错误。
-  升级的旋钮是思考强度,不是换模型。
+  但思考强度调高。绝不在 epoch 中途换 port:prompt 缓存按模型分键,
+  而一个模型的签名推理块回放给另一个模型是供应商级错误。配上 `restartTo`,
+  这架梯子有了顶端:所有梯级用尽后,策略会请求提前压缩,**新的 epoch 在更强的
+  port 上重启** —— 这是唯一一处换 think 模型不花钱的边界,因为从摘要重启
+  反正要付缓存成本,而 lens 从不跨 epoch 回放推理。这次切换只读取 epoch
+  冻结时的事实,因此可以证明它不会在 epoch 中途翻转;交接摘要由旧模型来写
+  (它按缓存价读自己的上下文)。
 - `escalate-on-reject`(用于 `observe`):没过质量门的本地 digest,
   可以在云端 port 上重试一次。observe 这个 slot 的调用每次都带着全新的小上下文,
   所以这种切换完全没有缓存包袱。
@@ -278,7 +282,7 @@ src/
 ## 测试与基准
 
 ```bash
-npm test               # 177 个测试
+npm test               # 179 个测试
 npm run bench          # 离线、确定性、免费 —— 机制本身的成本
 npm run bench:live     # 真实模型 —— 回答正确性问题
 ```

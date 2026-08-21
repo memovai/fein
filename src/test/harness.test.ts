@@ -212,6 +212,39 @@ test("escalate-on-stuck raises thinking, never the port", async () => {
   assert.equal(one.decision?.thinking, "medium");
 });
 
+test("escalate-on-stuck requests a restart only after the ladder is spent", async () => {
+  const weak = new ScriptedPort({ id: "weak", locality: "cloud", handler: () => ({ text: "" }) });
+  const strong = new ScriptedPort({ id: "strong", locality: "cloud", handler: () => ({ text: "" }) });
+  const policy = escalateOnStuck({ ladder: ["high"], restartTo: strong });
+  const binding = { slot: "think" as const, port: weak };
+  const req = { system: "s", messages: [] };
+
+  // First fire: top rung, no restart yet.
+  const one = policy.decide(binding, req, { pressure: "stuck", pressureCount: 1 });
+  assert.equal(one.port.info.id, "weak");
+  assert.equal(one.thinking, "high");
+  assert.equal(one.restart, undefined);
+
+  // Second fire: ladder spent -> same port still, but the restart is requested.
+  const two = policy.decide(binding, req, { pressure: "stuck", pressureCount: 2 });
+  assert.equal(two.port.info.id, "weak", "the swap itself waits for the epoch boundary");
+  assert.equal(two.restart, true);
+
+  // Post-restart: pinned to the stronger port for the whole epoch —
+  // with or without current stuck pressure, the decision cannot flip back.
+  const after = { restartCount: 1, stuckBeforeRestart: 2 };
+  assert.equal(policy.decide(binding, req, after).port.info.id, "strong");
+  const afterStuck = policy.decide(binding, req, { ...after, pressure: "stuck", pressureCount: 3 });
+  assert.equal(afterStuck.port.info.id, "strong");
+  assert.equal(afterStuck.thinking, "high", "the ladder still applies on the stronger port");
+
+  // A restart that was never earned does not switch (natural compaction, no stuck).
+  assert.equal(
+    policy.decide(binding, req, { restartCount: 1, stuckBeforeRestart: 0 }).port.info.id,
+    "weak",
+  );
+});
+
 test("right-size sends small requests to the small port and leaves big ones alone", async () => {
   const big = new ScriptedPort({ id: "big", locality: "cloud", handler: () => ({ text: "big" }) });
   const small = new ScriptedPort({ id: "small", locality: "local", handler: () => ({ text: "small" }) });
@@ -263,6 +296,23 @@ test("config object form binds a policy and keeps its target reachable", () => {
         bind: { observe: { port: "local", policy: { kind: "escalate-on-reject", to: "nope" } } },
       }),
     /unknown port "nope"/,
+  );
+
+  // restartTo resolves and lands in the fallback chain so the router accepts
+  // the post-restart route.
+  const restart = buildRouter({
+    ports: cfg.ports,
+    bind: {
+      think: { port: "local", policy: { kind: "escalate-on-stuck", restartTo: "cloud" } },
+    },
+  });
+  assert.equal(
+    restart.binding("think").fallbacks?.some((p) => p.info.id === "cloud"),
+    true,
+  );
+  assert.equal(
+    restart.portFor("think", { restartCount: 1, stuckBeforeRestart: 5 }).info.id,
+    "cloud",
   );
 });
 

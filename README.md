@@ -12,7 +12,7 @@ command are treated as one job, priced as one job, and sent to one model.
 
 FE!N splits the loop into **slots** and lets you bind a different model to each —
 so a frontier model does the thinking while a 3B model on your laptop does the
-reading. TypeScript, **zero runtime dependencies**, 177 tests.
+reading. TypeScript, **zero runtime dependencies**, 179 tests.
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -91,10 +91,16 @@ wall-clock or luck — so the same transcript re-derives the same decisions, and
 every decision lands in the trace and the ledger:
 
 - `escalate-on-stuck` (for `think`): the loop guard notices the model going in
-  circles → same port, higher thinking effort. Never a mid-session port swap:
+  circles → same port, higher thinking effort. Never a mid-epoch port swap:
   prompt caches are keyed per model, and one model's signed reasoning blocks
-  are a provider error when replayed to another. The effort dial is the
-  escalation knob; the model switch is not.
+  are a provider error when replayed to another. With `restartTo`, the ladder
+  gains a top: once every rung is spent, the policy requests an early
+  compaction and the **new epoch restarts on the stronger port** — the one
+  boundary where a think-model swap is free, because the summary restart pays
+  the cache cost anyway and the lens replays no reasoning across an epoch.
+  The switch reads only epoch-frozen facts, so it provably cannot flip
+  mid-epoch, and the old model writes the hand-off summary (it reads its own
+  context at the cached rate).
 - `escalate-on-reject` (for `observe`): a local digest that fails the quality
   gate gets one retry on the cloud port. The observe slot's calls carry a
   fresh, small context each time, so this swap has no cache stake at all.
@@ -310,7 +316,7 @@ honest list of what is still unsolved.
 ## Tests and benchmark
 
 ```bash
-npm test               # 177 tests
+npm test               # 179 tests
 npm run bench          # offline, deterministic, free — mechanism cost
 npm run bench:live     # real models — the correctness question
 ```

@@ -189,6 +189,86 @@ test("with a policy bound, a stuck loop escalates thinking on the same port", as
   assert.ok(agent.ledger.summary().escalations >= 1, "and the ledger can prove it happened");
 });
 
+test("a spent ladder restarts the epoch on the stronger port — and only at the boundary", async () => {
+  const trace: FeinTrace[] = [];
+  const reg = new ToolRegistry().register({
+    spec: { name: "look", description: "look", parameters: { type: "object", properties: {} } },
+    async run() {
+      return "same answer";
+    },
+  } as Tool);
+
+  // The weak model burns through two distinct repeat problems (the guard keys
+  // repeats by call signature, so each fires once): turns 0-2 repeat q=a,
+  // turns 3-5 repeat q=b — two fires against a one-rung ladder. Turn 6 is the
+  // turn that *carries* the restart request; the epoch lands before turn 7.
+  let weakCalls = 0;
+  const weak = new ScriptedPort({
+    id: "weak",
+    locality: "cloud",
+    handler: (_req, turn) => {
+      weakCalls++;
+      const q = turn < 3 ? "a" : turn < 6 ? "b" : "c";
+      return { text: "", toolCalls: [{ id: `t${turn}`, name: "look", args: { q } }] };
+    },
+  });
+  let strongCalls = 0;
+  const strong = new ScriptedPort({
+    id: "strong",
+    locality: "cloud",
+    handler: (req) => {
+      strongCalls++;
+      const convo = JSON.stringify(req.messages);
+      assert.ok(convo.includes("SUMMARY"), "the strong port starts from the epoch summary");
+      return { text: "solved: the needle was in the config" };
+    },
+  });
+  const summarizer = new ScriptedPort({
+    id: "local",
+    locality: "local",
+    handler: () => ({ text: "SUMMARY: still hunting the needle; look() exhausted." }),
+  });
+
+  const agent = new Agent({
+    router: new Router()
+      .bind("think", weak, {
+        fallbacks: [strong],
+        policy: escalateOnStuck({ ladder: ["high"], restartTo: strong }),
+      })
+      .bind("observe", summarizer),
+    tools: reg,
+    subagents: false,
+    maxSteps: 12,
+    onEvent: (e) => trace.push(e),
+  });
+  const run = await agent.run("find the needle");
+
+  // The restart happened, at the boundary, for the stated reason.
+  const epoch = trace.find((e) => e.type === "epoch") as { reason: string } | undefined;
+  assert.ok(epoch, "the epoch must fire");
+  assert.match(epoch.reason, /routing policy requested a restart/);
+
+  // The strong port took over after the epoch and finished the task.
+  assert.ok(strongCalls >= 1, "the stronger port serves the new epoch");
+  assert.match(run.text, /solved: the needle was in the config/);
+  assert.equal(run.stoppedBecause, "final_answer");
+
+  // Both ports appear in the ledger under the think slot; the route trace
+  // names the restart.
+  const thinkModels = new Set(agent.ledger.all.filter((r) => r.slot === "think").map((r) => r.model.id));
+  assert.ok(thinkModels.has("weak") && thinkModels.has("strong"));
+  const routes = trace.filter((e) => e.type === "route") as Array<{ reason: string }>;
+  assert.ok(routes.some((r) => /restarted on strong/.test(r.reason)));
+
+  // And the weak port was never called again after the epoch.
+  const epochIdx = trace.findIndex((e) => e.type === "epoch");
+  const stepsAfter = trace
+    .slice(epochIdx)
+    .filter((e) => e.type === "step") as Array<{ model: string }>;
+  assert.ok(stepsAfter.every((s) => s.model === "strong"), "no mid-epoch flip-flop");
+  assert.ok(weakCalls >= 6, "the weak port did the pre-restart work");
+});
+
 test("running out of turns forces a real answer, not a leftover fragment", async () => {
   const trace: FeinTrace[] = [];
   const run = await stuckAgent(3, trace).run("check the thing");

@@ -24,7 +24,7 @@ export interface RouteOutcome {
   /** Ports that threw before this one succeeded. */
   attempts: Array<{ port: ModelPort; error: string }>;
   /** Present when a policy routed this call somewhere other than the default. */
-  decision?: { reason: string; escalated: boolean; thinking?: ThinkingLevel };
+  decision?: { reason: string; escalated: boolean; thinking?: ThinkingLevel; restart?: boolean };
 }
 
 /**
@@ -96,7 +96,14 @@ export class Router {
       }
       chain = [d.port, ...alternates.filter((p) => p !== d.port)];
       const escalated = d.port !== b.port || (d.thinking !== undefined && req.thinking === undefined);
-      if (escalated) decision = { reason: d.reason, escalated, thinking: d.thinking };
+      if (escalated || d.restart) {
+        decision = {
+          reason: d.reason,
+          escalated,
+          thinking: d.thinking,
+          ...(d.restart ? { restart: true } : {}),
+        };
+      }
       req = { ...req, thinking: req.thinking ?? d.thinking };
     }
     const attempts: RouteOutcome["attempts"] = [];

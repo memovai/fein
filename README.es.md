@@ -13,7 +13,7 @@ cobran como un solo trabajo y se le mandan a un solo modelo.
 
 FE!N parte el bucle en **slots** y te deja asignar un modelo distinto a cada uno:
 que el modelo de frontera piense y que un modelo de 3B en tu portátil lea.
-TypeScript, **cero dependencias en tiempo de ejecución**, 177 pruebas.
+TypeScript, **cero dependencias en tiempo de ejecución**, 179 pruebas.
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -95,10 +95,16 @@ traza y en el libro de cuentas.
 
 - `escalate-on-stuck` (para `think`): el guardián del bucle nota que el modelo
   da vueltas → el mismo port, mayor esfuerzo de razonamiento. Nunca un cambio de
-  port a mitad de sesión: las cachés de prompt llevan clave por modelo, y los
+  port a mitad de época: las cachés de prompt llevan clave por modelo, y los
   bloques de razonamiento firmados de un modelo son un error del proveedor si se
-  reproducen ante otro. El mando de escalada es el esfuerzo; el cambio de
-  modelo, no.
+  reproducen ante otro. Con `restartTo`, la escalera gana una cima: agotados
+  todos los peldaños, la política pide una compactación temprana y la **nueva
+  época rearranca sobre el port más fuerte**, la única frontera donde cambiar el
+  modelo think sale gratis, porque el rearranque desde el resumen paga el coste
+  de caché de todos modos y la lente no reproduce razonamiento a través de una
+  época. El cambio lee solo hechos congelados en la época, así que
+  demostrablemente no puede voltearse a mitad de época, y el resumen de traspaso
+  lo escribe el modelo antiguo (que lee su propio contexto a la tarifa cacheada).
 - `escalate-on-reject` (para `observe`): un digest local que no pasa la puerta
   de calidad obtiene un reintento en el port de nube. Las llamadas del slot
   observe llevan cada vez un contexto pequeño y nuevo, así que este cambio no se
@@ -333,7 +339,7 @@ honesta de lo que sigue sin resolver.
 ## Pruebas y benchmark
 
 ```bash
-npm test               # 177 pruebas
+npm test               # 179 pruebas
 npm run bench          # offline, determinista, gratis — coste del mecanismo
 npm run bench:live     # modelos reales — la pregunta de la corrección
 ```

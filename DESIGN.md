@@ -714,8 +714,13 @@ escalation counts). What remains open: a policy that learns per-tool ("stop
 digesting tool X") — the hints plumbing makes it a small follow-up — and any
 policy driven by latency or error rates, which is inherently nondeterministic
 and stays excluded on purpose. Swapping the *think* port at an epoch boundary
-(compaction restarts from plain text, so nothing would break) is designed but
-not built. What IS built at the other safe boundary: plan-execute delegation —
+is built: `escalate-on-stuck` with `restartTo` requests an early compaction
+once its thinking ladder is spent, and the new epoch restarts on the stronger
+port — safe because the lens replays nothing across an epoch, stable because
+the switch condition reads only epoch-frozen hints, and near-free because the
+restart pays the cache cost regardless (the same observation Cognition's
+Devin Fusion reports from production: switch models where the cache miss was
+already happening). Also built at the other safe boundary: plan-execute delegation —
 bind the `execute` slot and the spawn tool grows a per-step `tier` choice the
 think model fills, an `acceptance` field that forces the plan to say what
 "done" means, and code-enforced fail-fast for light-tier children (first guard

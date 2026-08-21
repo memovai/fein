@@ -24,7 +24,7 @@ export interface PortConfig {
  * models/policy.ts; see that file for what each policy does and refuses to do.
  */
 export type PolicyConfig =
-  | { kind: "escalate-on-stuck"; thinking?: ThinkingLevel[] }
+  | { kind: "escalate-on-stuck"; thinking?: ThinkingLevel[]; restartTo?: string }
   | { kind: "escalate-on-reject"; to: string }
   | { kind: "right-size"; small: string; maxInputTokens?: number };
 
@@ -117,9 +117,17 @@ export function buildRouter(cfg: FeinConfig): Router {
     if (obj?.policy) {
       const p = obj.policy;
       switch (p.kind) {
-        case "escalate-on-stuck":
-          policy = escalateOnStuck(p.thinking ? { ladder: p.thinking } : undefined);
+        case "escalate-on-stuck": {
+          const restartTo = p.restartTo !== undefined ? resolve(slot, p.restartTo) : undefined;
+          policy = escalateOnStuck({
+            ...(p.thinking ? { ladder: p.thinking } : {}),
+            ...(restartTo ? { restartTo } : {}),
+          });
+          if (restartTo && restartTo !== primary && !fallbacks.includes(restartTo)) {
+            fallbacks.push(restartTo);
+          }
           break;
+        }
         case "escalate-on-reject": {
           const to = resolve(slot, p.to);
           policy = escalateOnReject({ to });
