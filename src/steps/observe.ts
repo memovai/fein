@@ -39,6 +39,9 @@ export const DEFAULT_DIGEST_POLICY: DigestPolicy = {
   // Left unset: resolved per call from where the observe model actually runs.
 };
 
+/** Consecutive quality-gate rejects before a tool's digests stop being attempted. */
+export const DIGEST_REJECT_LIMIT = 2;
+
 /**
  * Chunk cap when the policy does not pin one.
  *
@@ -112,9 +115,29 @@ export async function digest(args: {
   toolName: string;
   policy?: DigestPolicy;
   signal?: AbortSignal;
+  /**
+   * Per-tool reject memory, owned by the caller (one map per agent run).
+   * Some tools emit output that simply does not compress — dense diffs,
+   * base64, minified bundles — and every attempt is a paid inference that the
+   * quality gate then throws away. After `DIGEST_REJECT_LIMIT` consecutive
+   * rejects for one tool, digestion for that tool is skipped for the rest of
+   * the run. Counts are derivable from the recorded skip reasons, so replays
+   * re-derive the same skips.
+   */
+  rejects?: Map<string, number>;
 }): Promise<DigestOutcome> {
   const policy = args.policy ?? DEFAULT_DIGEST_POLICY;
   const originalTokens = estimateTokens(args.result.content);
+
+  if ((args.rejects?.get(args.toolName) ?? 0) >= DIGEST_REJECT_LIMIT) {
+    return {
+      digested: false,
+      originalTokens,
+      skipReason:
+        `tool "${args.toolName}" produced ${DIGEST_REJECT_LIMIT} rejected digests in a row — ` +
+        `its output does not compress; skipping for the rest of the run`,
+    };
+  }
 
   if (policy.keepErrorsVerbatim && args.result.isError) {
     return { digested: false, originalTokens, skipReason: "error output kept verbatim" };
@@ -236,7 +259,13 @@ export async function digest(args: {
   // judge, escalate once.
   if (digestTokens >= originalTokens * 0.7) {
     const retry = await escalateReject(args, channel, policy, hints, originalTokens);
-    if (retry) return retry;
+    if (retry) {
+      args.rejects?.delete(args.toolName);
+      return retry;
+    }
+    if (args.rejects) {
+      args.rejects.set(args.toolName, (args.rejects.get(args.toolName) ?? 0) + 1);
+    }
     return {
       digested: false,
       originalTokens,
@@ -246,6 +275,7 @@ export async function digest(args: {
     };
   }
 
+  args.rejects?.delete(args.toolName);
   return { digested: true, text: result.text, servedBy, originalTokens, digestTokens, escalated };
 }
 

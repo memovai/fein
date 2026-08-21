@@ -157,6 +157,63 @@ test("unbound slot fails with an actionable message", () => {
   assert.throws(() => new Router().portFor("observe"), /no model bound to slot "observe"/);
 });
 
+test("a repeatedly-dead primary is demoted, then probed for recovery", async () => {
+  let deadAttempts = 0;
+  let deadNow = true;
+  const flaky = new ScriptedPort({
+    id: "flaky",
+    locality: "local",
+    handler: () => {
+      deadAttempts++;
+      if (deadNow) throw new Error("connection refused");
+      return { text: "recovered" };
+    },
+  });
+  const alive = new ScriptedPort({ id: "alive", locality: "cloud", handler: () => ({ text: "ok" }) });
+  const router = new Router().bind("observe", flaky, { fallbacks: [alive] });
+  const call = () => router.run("observe", { system: "s", messages: [] });
+
+  // Two failures earn the cooldown; both calls still succeed via the fallback.
+  await call();
+  await call();
+  assert.equal(deadAttempts, 2);
+
+  // Cooled down: the dead primary is not even attempted, and the outcome says so.
+  const skipped = await call();
+  assert.equal(deadAttempts, 2, "no doomed attempt while cooled down");
+  assert.equal(skipped.port.info.id, "alive");
+  assert.deepEqual(skipped.cooledDown, ["flaky"]);
+
+  // The probe eventually retries it in front — and notices the recovery.
+  deadNow = false;
+  let probed;
+  for (let i = 0; i < 10 && deadAttempts === 2; i++) probed = await call();
+  assert.equal(deadAttempts, 3, "the probe reached the primary again");
+  assert.equal(probed!.port.info.id, "flaky", "recovery is noticed and the primary serves again");
+
+  // And a recovered port is fully rehabilitated: served on the next call too.
+  const after = await call();
+  assert.equal(after.port.info.id, "flaky");
+  assert.equal(after.cooledDown, undefined);
+});
+
+test("a chain of one never cools down — last resort beats no resort", async () => {
+  let attempts = 0;
+  const only = new ScriptedPort({
+    id: "only",
+    locality: "cloud",
+    handler: () => {
+      attempts++;
+      throw new Error("boom");
+    },
+  });
+  const router = new Router().bind("observe", only);
+  for (let i = 0; i < 4; i++) {
+    await assert.rejects(router.run("observe", { system: "s", messages: [] }));
+  }
+  assert.equal(attempts, 4, "the sole port is always attempted");
+});
+
 // --- adaptive routing (opt-in policies) ---------------------------------------
 
 test("hints on a policy-less binding change nothing", async () => {

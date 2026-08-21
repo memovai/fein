@@ -206,6 +206,8 @@ export class Agent {
   private stuckBeforeRestart = 0;
   /** A routing policy asked for an early epoch; honored at the next turn start. */
   private restartRequested = false;
+  /** Per-tool digest reject memory; see the `rejects` doc in steps/observe.ts. */
+  private readonly digestRejects = new Map<string, number>();
   /** The slot serving this agent's own turns. "think" unless the spawner said otherwise. */
   private readonly thinkSlot: StepName;
   private readonly bailOnStuck: boolean;
@@ -376,7 +378,7 @@ export class Agent {
     const warm = opts.keepCacheWarm;
     this.keeper = warm
       ? new CacheKeeper({
-          port: this.router.portFor(this.thinkSlot),
+          port: () => this.router.portFor(this.thinkSlot, this.thinkHints()),
           ledger: this.ledger,
           ...(typeof warm === "object" ? warm : {}),
           onRefresh: (n, cacheReadTokens) =>
@@ -719,6 +721,7 @@ export class Agent {
             result: r.result,
             toolName: r.toolName,
             policy: this.digestPolicy,
+            rejects: this.digestRejects,
             ...(signal !== undefined ? { signal } : {}),
           }),
         ),

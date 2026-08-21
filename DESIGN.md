@@ -710,9 +710,12 @@ calls carry a fresh context, so the swap has no cache stake), and right-size
 (trivially small side-slot requests go to the small model). The §2 Rule 6
 tension resolves because every input to a decision is derivable from the
 recorded transcript, and every decision is logged (`route` trace event, ledger
-escalation counts). What remains open: a policy that learns per-tool ("stop
-digesting tool X") — the hints plumbing makes it a small follow-up — and any
-policy driven by latency or error rates, which is inherently nondeterministic
+escalation counts). Per-tool learning is in: two consecutive quality-gate
+rejects for one tool stop its digests for the rest of the run (steps/observe.ts,
+`DIGEST_REJECT_LIMIT`), and a port that throws twice in a row is demoted behind
+its alternates and probed every few calls — both counted in calls rather than
+wall-clock, so replays stay honest. What remains open: any policy driven by
+latency or error *rates*, which is inherently nondeterministic
 and stays excluded on purpose. Swapping the *think* port at an epoch boundary
 is built: `escalate-on-stuck` with `restartTo` requests an early compaction
 once its thinking ladder is spent, and the new epoch restarts on the stronger

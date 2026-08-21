@@ -39,7 +39,14 @@ import type { Ledger } from "../telemetry/ledger.js";
  *    is more speculative. Enable per-provider, not globally.
  */
 export interface CacheKeeperOptions {
-  port: ModelPort;
+  /**
+   * The port whose cache to keep warm — or a resolver for it. A resolver is
+   * the right choice whenever routing can re-point the slot between turns
+   * (an epoch restart lands on a different port): a heartbeat sent to the
+   * *previous* port warms a cache nobody will read again, and replays the new
+   * port's reasoning blocks to a model that will reject them.
+   */
+  port: ModelPort | (() => ModelPort);
   /** How often to refresh, ms. Should be comfortably under the provider TTL. */
   intervalMs?: number;
   /** Stop after this many refreshes; the user has clearly gone away. */
@@ -92,9 +99,10 @@ export class CacheKeeper {
     }
     this.refreshes++;
     try {
+      const port = typeof this.opts.port === "function" ? this.opts.port() : this.opts.port;
       // maxTokens 0: run prefill, refresh the cache, bill no output tokens.
-      const result = await this.opts.port.complete({ ...req, maxTokens: 0, temperature: 0 });
-      this.opts.ledger?.record("think", this.opts.port.info, result);
+      const result = await port.complete({ ...req, maxTokens: 0, temperature: 0 });
+      this.opts.ledger?.record("think", port.info, result);
       this.opts.onRefresh?.(this.refreshes, result.usage.cacheReadTokens);
     } catch {
       // A failed heartbeat is not worth surfacing or retrying; the next real

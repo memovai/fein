@@ -12,7 +12,7 @@ command are treated as one job, priced as one job, and sent to one model.
 
 FE!N splits the loop into **slots** and lets you bind a different model to each —
 so a frontier model does the thinking while a 3B model on your laptop does the
-reading. TypeScript, **zero runtime dependencies**, 179 tests.
+reading. TypeScript, **zero runtime dependencies**, 182 tests.
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -84,6 +84,9 @@ tool calling fuses thought and action into one completion, and there is no
 
 Any slot takes any model. Every slot takes a fallback chain, so a dead local
 runtime degrades that slot to the cloud rather than taking the session down.
+A port that fails twice in a row is demoted behind its alternates and probed
+every few calls — counted in calls, not wall-clock, so replays stay honest —
+which spares every subsequent call the doomed connection attempt.
 
 **Bindings are static by default; adaptive routing is opt-in per slot.** A
 binding can carry a policy that switches on facts the loop reports, never on
@@ -316,7 +319,7 @@ honest list of what is still unsolved.
 ## Tests and benchmark
 
 ```bash
-npm test               # 179 tests
+npm test               # 182 tests
 npm run bench          # offline, deterministic, free — mechanism cost
 npm run bench:live     # real models — the correctness question
 ```

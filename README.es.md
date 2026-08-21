@@ -13,7 +13,7 @@ cobran como un solo trabajo y se le mandan a un solo modelo.
 
 FE!N parte el bucle en **slots** y te deja asignar un modelo distinto a cada uno:
 que el modelo de frontera piense y que un modelo de 3B en tu portátil lea.
-TypeScript, **cero dependencias en tiempo de ejecución**, 179 pruebas.
+TypeScript, **cero dependencias en tiempo de ejecución**, 182 pruebas.
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -86,6 +86,10 @@ control que ReAct no tiene.
 
 Cualquier slot admite cualquier modelo. Todos aceptan una cadena de respaldo, así
 que un runtime local caído degrada ese slot a la nube en vez de tumbar la sesión.
+Un port que falla dos veces seguidas queda relegado detrás de sus alternativas y
+se sondea cada pocas llamadas —contado en llamadas, no en reloj de pared, para
+que las repeticiones sigan siendo honestas—, lo que ahorra a cada llamada
+posterior el intento de conexión condenado.
 
 **Las asignaciones son estáticas por defecto; el enrutamiento adaptativo se
 activa slot a slot.** Una asignación puede llevar una política que conmuta según
@@ -339,7 +343,7 @@ honesta de lo que sigue sin resolver.
 ## Pruebas y benchmark
 
 ```bash
-npm test               # 179 pruebas
+npm test               # 182 pruebas
 npm run bench          # offline, determinista, gratis — coste del mecanismo
 npm run bench:live     # modelos reales — la pregunta de la corrección
 ```

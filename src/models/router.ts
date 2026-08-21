@@ -25,7 +25,14 @@ export interface RouteOutcome {
   attempts: Array<{ port: ModelPort; error: string }>;
   /** Present when a policy routed this call somewhere other than the default. */
   decision?: { reason: string; escalated: boolean; thinking?: ThinkingLevel; restart?: boolean };
+  /** Ports demoted to the back of the chain by the failure cooldown. */
+  cooledDown?: string[];
 }
+
+/** Consecutive failures before a port is demoted behind its alternates. */
+const COOLDOWN_AFTER_FAILS = 2;
+/** Demoted ports get probed again every Nth call, so recovery is noticed. */
+const COOLDOWN_PROBE_EVERY = 8;
 
 /**
  * The Router is the whole "model as a plugin" idea in one object: the loop
@@ -39,6 +46,16 @@ export interface RouteOutcome {
  */
 export class Router {
   private bindings = new Map<StepName, Binding>();
+  /**
+   * Failure cooldown, counted in calls rather than wall-clock on purpose: a
+   * clock would make routing depend on when the run happened, and the record
+   * is supposed to replay. After COOLDOWN_AFTER_FAILS consecutive throws a
+   * port is demoted to the back of its chain (still reachable — last resort,
+   * not banished), and probed in front again every COOLDOWN_PROBE_EVERY
+   * calls so a recovered runtime is noticed. Without this, every call to a
+   * slot with a dead primary pays a doomed connection attempt first.
+   */
+  private failures = new Map<ModelPort, { consecutive: number; skips: number }>();
 
   bind(slot: StepName, port: ModelPort, opts: Omit<Binding, "slot" | "port"> = {}): this {
     this.bindings.set(slot, { slot, port, ...opts });
@@ -106,6 +123,29 @@ export class Router {
       }
       req = { ...req, thinking: req.thinking ?? d.thinking };
     }
+
+    // Failure cooldown: demote known-bad ports behind their alternates, but
+    // only when an alternate exists — a chain of one has nothing to prefer.
+    let cooledDown: string[] | undefined;
+    if (chain.length > 1) {
+      const demoted: ModelPort[] = [];
+      const kept = chain.filter((port) => {
+        const f = this.failures.get(port);
+        if (!f || f.consecutive < COOLDOWN_AFTER_FAILS) return true;
+        if (f.skips >= COOLDOWN_PROBE_EVERY - 1) {
+          f.skips = 0; // probe: try it in its normal position this call
+          return true;
+        }
+        f.skips++;
+        demoted.push(port);
+        return false;
+      });
+      if (demoted.length > 0 && kept.length > 0) {
+        chain = [...kept, ...demoted];
+        cooledDown = demoted.map((p) => p.info.id);
+      }
+    }
+
     const attempts: RouteOutcome["attempts"] = [];
 
     for (const port of chain) {
@@ -118,8 +158,12 @@ export class Router {
           },
           signal,
         );
-        return { result, port, attempts, decision };
+        this.failures.delete(port);
+        return { result, port, attempts, decision, ...(cooledDown ? { cooledDown } : {}) };
       } catch (err) {
+        const f = this.failures.get(port) ?? { consecutive: 0, skips: 0 };
+        f.consecutive++;
+        this.failures.set(port, f);
         attempts.push({ port, error: err instanceof Error ? err.message : String(err) });
       }
     }

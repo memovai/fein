@@ -463,6 +463,70 @@ test("without a policy a rejected digest keeps the original — fallbacks are fo
   assert.match(out.skipReason!, /not meaningfully smaller/);
 });
 
+test("a tool whose digests keep getting rejected stops being digested", async () => {
+  const content = "x".repeat(4000);
+  let calls = 0;
+  const local = new ScriptedPort({
+    id: "local",
+    locality: "local",
+    contextWindow: 32_768,
+    handler: () => {
+      calls++;
+      return { text: "y".repeat(3600) }; // always fails the 70% gate
+    },
+  });
+  const rejects = new Map<string, number>();
+  const run = () =>
+    digest({
+      router: new Router().bind("observe", local),
+      ledger: new Ledger(),
+      transcript: new Transcript(),
+      result: { callId: "x", content, isError: false },
+      toolName: "diff",
+      rejects,
+    });
+
+  await run(); // reject 1 — paid
+  await run(); // reject 2 — paid, limit reached
+  const third = await run();
+
+  assert.equal(calls, 2, "the third attempt is never paid for");
+  assert.equal(third.digested, false);
+  assert.match(third.skipReason!, /does not compress/);
+  assert.match(third.skipReason!, /"diff"/, "the skip names the tool");
+
+  // Another tool is unaffected — the memory is per tool, not global.
+  const other = await digest({
+    router: new Router().bind("observe", local),
+    ledger: new Ledger(),
+    transcript: new Transcript(),
+    result: { callId: "x", content, isError: false },
+    toolName: "shell",
+    rejects,
+  });
+  assert.equal(calls, 3);
+  assert.match(other.skipReason!, /not meaningfully smaller/);
+
+  // A success resets the counter: the tool is rehabilitated, not banished.
+  const rejects2 = new Map<string, number>([["diff", 1]]);
+  const good = new ScriptedPort({
+    id: "local2",
+    locality: "local",
+    contextWindow: 32_768,
+    handler: () => ({ text: "short digest" }),
+  });
+  const ok = await digest({
+    router: new Router().bind("observe", good),
+    ledger: new Ledger(),
+    transcript: new Transcript(),
+    result: { callId: "x", content, isError: false },
+    toolName: "diff",
+    rejects: rejects2,
+  });
+  assert.equal(ok.digested, true);
+  assert.equal(rejects2.get("diff"), undefined, "success clears the memory");
+});
+
 test("reject escalation declines work that would need chunked cloud calls", async () => {
   // ~1500 tokens across many lines: one chunk for the local window, several for
   // the small cloud window below — so escalation must refuse, same economics as
