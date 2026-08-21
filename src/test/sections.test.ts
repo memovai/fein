@@ -5,7 +5,7 @@ import {
   SectionGuard,
   scanForVolatileContent,
 } from "../steps/sections.js";
-import { driverSections } from "../steps/prompts.js";
+import { thinkSections } from "../steps/prompts.js";
 import { SessionStore } from "../session/store.js";
 import { PersistentSession } from "../session/persist.js";
 import { Agent, type FeinTrace } from "../core/loop.js";
@@ -73,7 +73,7 @@ test("reordering is caught and named as the intermittent bug it is", () => {
 test("a stable prompt reports no drift across many builds", () => {
   const g = new SectionGuard();
   const build = () =>
-    driverSections({ workspace: "/w", hybrid: true, memory: true, subagents: true }).fingerprint();
+    thinkSections({ workspace: "/w", hybrid: true, memory: true, subagents: true }).fingerprint();
   g.check(build());
   for (let i = 0; i < 5; i++) {
     assert.deepEqual(g.check(build()), [], `drift on build ${i}`);
@@ -115,8 +115,8 @@ test("the scanner does not cry wolf on ordinary prompt text", () => {
   }
 });
 
-test("the real driver prompt is clean", () => {
-  const sections = driverSections({
+test("the real think model prompt is clean", () => {
+  const sections = thinkSections({
     workspace: "/w",
     hybrid: true,
     memory: true,
@@ -130,11 +130,26 @@ test("the real driver prompt is clean", () => {
   }
 });
 
+test("plan-execute guidance appears only when the execute slot is bound", () => {
+  const base = { workspace: "/w", hybrid: false, subagents: true };
+  const without = thinkSections(base).build();
+  const withTiers = thinkSections({ ...base, tiers: true }).build();
+
+  assert.doesNotMatch(without, /light tier/, "no execute binding, no tier vocabulary");
+  assert.match(withTiers, /plan before you spawn/);
+  assert.match(withTiers, /acceptance criteria/);
+  assert.match(withTiers, /Never respawn the\s+same thing unchanged/);
+  // Still one frozen section — the guidance must not add prompt volatility.
+  for (const s of thinkSections({ ...base, tiers: true }).list()) {
+    assert.equal(scanForVolatileContent(s), undefined);
+  }
+});
+
 test("an agent warns rather than silently shipping a volatile prompt", async () => {
   const trace: FeinTrace[] = [];
   new Agent({
     router: new Router().bind(
-      "driver",
+      "think",
       new ScriptedPort({ id: "c", locality: "cloud", handler: () => ({ text: "" }) }),
     ),
     tools: new ToolRegistry(),

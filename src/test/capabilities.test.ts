@@ -66,7 +66,7 @@ test("write_skill persists a readable skill and is side-effecting", async () => 
   const dir = await tmp();
   const lib = new SkillLibrary(dir);
   const [, write] = skillTools(lib);
-  assert.equal(write!.spec.sideEffects, true, "durable instructions must pass the verifier");
+  assert.equal(write!.spec.sideEffects, true, "durable instructions must pass the verify model");
 
   await write!.run(
     { name: "Flaky Tests!", description: "Find and fix flaky tests", body: "# Steps\n1. rerun" },
@@ -112,7 +112,7 @@ test("a beforeTool hook can block a call, and the model sees why", async () => {
         : { text: "understood" },
   });
   const agent = new Agent({
-    router: new Router().bind("driver", cloud),
+    router: new Router().bind("think", cloud),
     tools: reg,
     hooks,
     subagents: false,
@@ -148,7 +148,7 @@ test("a throwing observability hook does not abort the turn", async () => {
   });
   const cloud = new ScriptedPort({ id: "c", locality: "cloud", handler: () => ({ text: "fine" }) });
   const agent = new Agent({
-    router: new Router().bind("driver", cloud),
+    router: new Router().bind("think", cloud),
     tools: new ToolRegistry(),
     hooks,
     subagents: false,
@@ -213,7 +213,7 @@ test("depth cap removes the spawn tool rather than refusing at call time", () =>
   const build = (depth: number) =>
     new Agent({
       router: new Router().bind(
-        "driver",
+        "think",
         new ScriptedPort({ id: "c", locality: "cloud", handler: () => ({ text: "" }) }),
       ),
       tools: new ToolRegistry(),
@@ -255,7 +255,7 @@ test("a subagent runs, reports back, and its cost rolls up to the parent", async
   });
 
   const agent = new Agent({
-    router: new Router().bind("driver", cloud),
+    router: new Router().bind("think", cloud),
     tools: new ToolRegistry(),
     subagents: { maxDepth: 2, maxSteps: 3 },
     maxSteps: 4,
@@ -268,8 +268,246 @@ test("a subagent runs, reports back, and its cost rolls up to the parent", async
   assert.match(toolMsg.results[0]!.content, /There are 12 files/);
   assert.match(toolMsg.results[0]!.content, /read-only/, "subagents are read-only by default");
 
-  // Parent's ledger includes the child's driver calls.
+  // Parent's ledger includes the child's think model calls.
   assert.ok(agent.ledger.summary().calls >= 3, "child spend must appear in the parent ledger");
+});
+
+test("subagents.thinkSlot re-points the child's turns at a cheaper binding", async () => {
+  // The zero-cache-cost model switch: a child starts from a fresh context, so
+  // serving its whole sub-task from another slot's binding breaks no prefix.
+  const cloud = new ScriptedPort({
+    id: "cloud",
+    locality: "cloud",
+    handler: (req, turn) => {
+      const text = req.messages.map((m) => ("content" in m ? m.content : "")).join(" ");
+      if (text.includes("count the files")) {
+        throw new Error("the parent's slot must not serve the child's turns");
+      }
+      return turn === 0
+        ? {
+            text: "",
+            toolCalls: [{ id: "s1", name: "spawn_subagent", args: { task: "count the files in src/" } }],
+          }
+        : { text: "done" };
+    },
+  });
+  let localTurns = 0;
+  const local = new ScriptedPort({
+    id: "local",
+    locality: "local",
+    handler: () => {
+      localTurns++;
+      return { text: "There are 12 files." };
+    },
+  });
+
+  const agent = new Agent({
+    router: new Router().bind("think", cloud).bind("observe", local),
+    tools: new ToolRegistry(),
+    subagents: { maxDepth: 2, maxSteps: 3, thinkSlot: "observe" },
+    maxSteps: 4,
+  });
+  await agent.run("find out how many files");
+
+  assert.ok(localTurns >= 1, "the child's turns went to the observe binding");
+  const toolMsg = agent.view().find((m) => m.role === "tool");
+  assert.ok(toolMsg && toolMsg.role === "tool");
+  assert.match(toolMsg.results[0]!.content, /There are 12 files/);
+  // The ledger attributes the child's turns to the slot that served them.
+  assert.ok(agent.ledger.summary().bySlot["observe"]!.calls >= 1);
+});
+
+// ── plan-execute tiers ────────────────────────────────────────────────────────
+
+test("the spawn tool offers a tier choice only when execute is bound", () => {
+  const cloud = new ScriptedPort({ id: "cloud", locality: "cloud", handler: () => ({ text: "x" }) });
+  const local = new ScriptedPort({ id: "local", locality: "local", handler: () => ({ text: "x" }) });
+
+  const spec = (router: Router) =>
+    new Agent({ router, tools: new ToolRegistry(), subagents: { maxDepth: 2 } })
+      .tools.get("spawn_subagent")!.spec.parameters as { properties: Record<string, unknown> };
+
+  const withoutExecute = spec(new Router().bind("think", cloud));
+  assert.equal(withoutExecute.properties["tier"], undefined, "unbound slot advertises nothing");
+
+  const withExecute = spec(new Router().bind("think", cloud).bind("execute", local));
+  assert.ok(withExecute.properties["tier"], "binding execute surfaces the choice");
+  assert.ok(withExecute.properties["acceptance"], "acceptance criteria are always offered");
+});
+
+test("tier light runs the whole sub-task on the execute binding, heavy beats config", async () => {
+  const childTasks: string[] = [];
+  const cloud = new ScriptedPort({
+    id: "cloud",
+    locality: "cloud",
+    handler: (req, turn) => {
+      const text = req.messages.map((m) => ("content" in m ? m.content : "")).join(" ");
+      if (text.includes("judge the design")) {
+        childTasks.push("heavy-on-cloud");
+        return { text: "Design judged." };
+      }
+      return turn === 0
+        ? {
+            text: "",
+            toolCalls: [
+              { id: "s1", name: "spawn_subagent", args: { task: "list the files", tier: "light" } },
+              {
+                id: "s2",
+                name: "spawn_subagent",
+                args: { task: "judge the design", tier: "heavy", acceptance: "names a risk" },
+              },
+            ],
+          }
+        : { text: "done" };
+    },
+  });
+  const local = new ScriptedPort({
+    id: "local",
+    locality: "local",
+    handler: (req) => {
+      const text = req.messages.map((m) => ("content" in m ? m.content : "")).join(" ");
+      childTasks.push(text.includes("list the files") ? "light-on-local" : "light-unknown");
+      return { text: "a.ts, b.ts" };
+    },
+  });
+
+  const agent = new Agent({
+    router: new Router().bind("think", cloud).bind("execute", local),
+    tools: new ToolRegistry(),
+    // thinkSlot config says observe — the explicit heavy tier must beat it.
+    subagents: { maxDepth: 2, maxSteps: 3, thinkSlot: "execute" },
+    maxSteps: 4,
+  });
+  await agent.run("plan and do it");
+
+  assert.ok(childTasks.includes("light-on-local"), "light step served by the execute binding");
+  assert.ok(childTasks.includes("heavy-on-cloud"), "heavy step served by the parent's own slot");
+  assert.ok(agent.ledger.summary().bySlot["execute"]!.calls >= 1, "ledger attributes execute work");
+
+  // The acceptance criteria reached the heavy child's task.
+  const heavyPrompt = childTasks.includes("heavy-on-cloud");
+  assert.ok(heavyPrompt);
+});
+
+test("acceptance criteria are appended to the child's task", async () => {
+  let childSaw = "";
+  const cloud = new ScriptedPort({
+    id: "cloud",
+    locality: "cloud",
+    handler: (req, turn) => {
+      const text = req.messages.map((m) => ("content" in m ? m.content : "")).join(" ");
+      if (text.includes("count the files")) {
+        childSaw = text;
+        return { text: "12 files; criterion met." };
+      }
+      return turn === 0
+        ? {
+            text: "",
+            toolCalls: [
+              {
+                id: "s1",
+                name: "spawn_subagent",
+                args: { task: "count the files", acceptance: "an exact number, not an estimate" },
+              },
+            ],
+          }
+        : { text: "done" };
+    },
+  });
+
+  const agent = new Agent({
+    router: new Router().bind("think", cloud),
+    tools: new ToolRegistry(),
+    subagents: { maxDepth: 2, maxSteps: 3 },
+    maxSteps: 4,
+  });
+  await agent.run("go");
+
+  assert.match(childSaw, /Acceptance criteria:/);
+  assert.match(childSaw, /an exact number, not an estimate/);
+  assert.match(childSaw, /whether each criterion is met/);
+});
+
+test("a stuck light subagent bails early and the parent is told to change something", async () => {
+  const look = {
+    spec: { name: "look", description: "look", parameters: { type: "object", properties: {} } },
+    async run() {
+      return "same answer";
+    },
+  } as Tool;
+
+  const cloud = new ScriptedPort({
+    id: "cloud",
+    locality: "cloud",
+    handler: (req, turn) =>
+      turn === 0
+        ? {
+            text: "",
+            toolCalls: [
+              { id: "s1", name: "spawn_subagent", args: { task: "find the needle", tier: "light" } },
+            ],
+          }
+        : { text: "done" },
+  });
+  let localCalls = 0;
+  const local = new ScriptedPort({
+    id: "local",
+    locality: "local",
+    handler: (req) => {
+      localCalls++;
+      const text = req.messages.map((m) => ("content" in m ? m.content : "")).join(" ");
+      if (text.includes("repeating yourself")) {
+        return { text: "Blocked: the needle is not in this haystack." };
+      }
+      // The classic death spiral: the same call, forever.
+      return { text: "", toolCalls: [{ id: "t", name: "look", args: {} }] };
+    },
+  });
+
+  const agent = new Agent({
+    router: new Router().bind("think", cloud).bind("execute", local),
+    tools: new ToolRegistry().register(look),
+    subagents: { maxDepth: 2, maxSteps: 12 },
+    maxSteps: 4,
+  });
+  await agent.run("go find it");
+
+  const toolMsg = agent.view().find((m) => m.role === "tool");
+  assert.ok(toolMsg && toolMsg.role === "tool");
+  assert.match(toolMsg.results[0]!.content, /stopped early because it was going in circles/);
+  assert.match(toolMsg.results[0]!.content, /heavy tier, a different decomposition/);
+  assert.match(toolMsg.results[0]!.content, /Blocked: the needle is not in this haystack/);
+  assert.ok(localCalls < 12, "it bailed well before the step budget");
+});
+
+test("tier light without an execute binding is refused at the schema", async () => {
+  const cloud = new ScriptedPort({
+    id: "cloud",
+    locality: "cloud",
+    handler: (req, turn) =>
+      turn === 0
+        ? {
+            text: "",
+            toolCalls: [
+              { id: "s1", name: "spawn_subagent", args: { task: "list files", tier: "light" } },
+            ],
+          }
+        : { text: "done" },
+  });
+
+  const agent = new Agent({
+    router: new Router().bind("think", cloud),
+    tools: new ToolRegistry(),
+    subagents: { maxDepth: 2 },
+    maxSteps: 3,
+  });
+  await agent.run("go");
+
+  const toolMsg = agent.view().find((m) => m.role === "tool");
+  assert.ok(toolMsg && toolMsg.role === "tool");
+  // Argument validation refuses the unknown property: the capability is
+  // absent from the schema, so it cannot be invoked — stronger than a policy.
+  assert.match(toolMsg.results[0]!.content, /unknown property "tier"/);
 });
 
 test("a per-agent cap is not a cap — the run-level budget is (regression)", async () => {
@@ -295,7 +533,7 @@ test("a per-agent cap is not a cap — the run-level budget is (regression)", as
   });
 
   await new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: new ToolRegistry(),
     subagents: { maxDepth: 3, maxSpawns: 3, maxSteps: 6, maxTotalSpawns: 5 },
     maxSteps: 8,
@@ -328,7 +566,7 @@ test("the budget is shared across branches, not per subtree (regression)", async
   });
 
   await new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: new ToolRegistry(),
     spawnBudget: budget,
     subagents: { maxDepth: 3, maxSpawns: 2, maxSteps: 5 },
@@ -356,7 +594,7 @@ test("spawn limit stops runaway fan-out", async () => {
     },
   });
   const agent = new Agent({
-    router: new Router().bind("driver", cloud),
+    router: new Router().bind("think", cloud),
     tools: new ToolRegistry(),
     subagents: { maxDepth: 2, maxSpawns: 2, maxSteps: 2 },
     maxSteps: 6,
@@ -421,7 +659,7 @@ test("a subagent inherits skills, project context, and the digest policy", async
   });
 
   const agent = new Agent({
-    router: new Router().bind("driver", cloud).bind("digester", child),
+    router: new Router().bind("think", cloud).bind("observe", child),
     tools: reg,
     skills,
     projectContext: "<project-context source=\"AGENTS.md\">use tabs</project-context>",
@@ -440,7 +678,7 @@ test("a subagent inherits skills, project context, and the digest policy", async
 });
 
 test("a subagent inherits the spill policy (regression)", async () => {
-  // Same class as the digester bug: `spawn` forgot a newer option. A subagent
+  // Same class as the observe model bug: `spawn` forgot a newer option. A subagent
   // exists to absorb bulk, so losing its bounding defeats the reason it exists.
   const seen: Array<number | undefined> = [];
   const reg = new ToolRegistry().register({
@@ -469,7 +707,7 @@ test("a subagent inherits the spill policy (regression)", async () => {
   });
 
   await new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: reg,
     spillPolicy: { maxInlineBytes: 1000, never: [], headRatio: 0.7 },
     subagents: { maxDepth: 2, maxSteps: 4 },
@@ -523,7 +761,7 @@ test("a child inherits by default and excludes on purpose (structural)", async (
   const session = PersistentSession.create(store, { title: "parent only" });
 
   await new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: reg,
     skills,
     identity: "PARENT_IDENTITY_MARKER",

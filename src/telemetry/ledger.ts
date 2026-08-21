@@ -23,12 +23,21 @@ export interface CallRecord {
   /** True if a prefix break was detected on this call. */
   prefixBroken: boolean;
   brokenAt?: number;
+  /** True if a routing policy sent this call somewhere other than the default. */
+  escalated?: boolean;
+  /** The policy's stated rationale, recorded verbatim. */
+  routeReason?: string;
 }
 
 export interface LedgerSummary {
   calls: number;
   byLocality: Record<"local" | "cloud", { calls: number; inTok: number; outTok: number; usd: number; ms: number }>;
-  bySlot: Record<string, { calls: number; usd: number; ms: number; local: number; cloud: number }>;
+  bySlot: Record<
+    string,
+    { calls: number; usd: number; ms: number; local: number; cloud: number; escalations: number }
+  >;
+  /** Calls a routing policy escalated (port swap or raised thinking). */
+  escalations: number;
   cache: {
     readTokens: number;
     writeTokens: number;
@@ -42,7 +51,7 @@ export interface LedgerSummary {
   totalUsd: number;
   totalMs: number;
   /**
-   * What the locally-served work would have cost at the driver's cloud rate.
+   * What the locally-served work would have cost at the think model's cloud rate.
    * This is an estimate, not a bill: token counts differ across tokenizers.
    */
   offloadedUsdEstimate: number;
@@ -60,6 +69,7 @@ export class Ledger {
     model: ModelInfo,
     result: CompletionResult,
     prefix?: { stable: boolean; brokenAt?: number },
+    route?: { escalated: boolean; reason: string },
   ): void {
     this.records.push({
       slot,
@@ -71,6 +81,7 @@ export class Ledger {
       latencyMs: result.latencyMs,
       prefixBroken: prefix ? !prefix.stable : false,
       ...(prefix?.brokenAt !== undefined ? { brokenAt: prefix.brokenAt } : {}),
+      ...(route?.escalated ? { escalated: true, routeReason: route.reason } : {}),
     });
   }
 
@@ -98,7 +109,7 @@ export class Ledger {
     return inUsd + readUsd + writeUsd + outUsd;
   }
 
-  summary(driverRates?: { in: number; out: number }): LedgerSummary {
+  summary(thinkRates?: { in: number; out: number }): LedgerSummary {
     const byLocality: LedgerSummary["byLocality"] = {
       local: { calls: 0, inTok: 0, outTok: 0, usd: 0, ms: 0 },
       cloud: { calls: 0, inTok: 0, outTok: 0, usd: 0, ms: 0 },
@@ -110,6 +121,7 @@ export class Ledger {
     let totalUsd = 0;
     let totalMs = 0;
     let offloaded = 0;
+    let escalations = 0;
     const breaks: LedgerSummary["cache"]["breaks"] = [];
 
     for (const r of this.records) {
@@ -121,11 +133,15 @@ export class Ledger {
       loc.usd += usd;
       loc.ms += r.latencyMs;
 
-      const slot = (bySlot[r.slot] ??= { calls: 0, usd: 0, ms: 0, local: 0, cloud: 0 });
+      const slot = (bySlot[r.slot] ??= { calls: 0, usd: 0, ms: 0, local: 0, cloud: 0, escalations: 0 });
       slot.calls++;
       slot.usd += usd;
       slot.ms += r.latencyMs;
       slot[r.model.locality]++;
+      if (r.escalated) {
+        slot.escalations++;
+        escalations++;
+      }
 
       readTokens += r.cacheReadTokens;
       writeTokens += r.cacheWriteTokens;
@@ -133,10 +149,10 @@ export class Ledger {
       totalUsd += usd;
       totalMs += r.latencyMs;
 
-      if (r.model.locality === "local" && driverRates) {
+      if (r.model.locality === "local" && thinkRates) {
         offloaded +=
-          ((r.inputTokens + r.cacheReadTokens) / 1e6) * driverRates.in +
-          (r.outputTokens / 1e6) * driverRates.out;
+          ((r.inputTokens + r.cacheReadTokens) / 1e6) * thinkRates.in +
+          (r.outputTokens / 1e6) * thinkRates.out;
       }
       if (r.prefixBroken) {
         breaks.push({ slot: r.slot, model: r.model.id, at: r.brokenAt ?? -1 });
@@ -167,14 +183,15 @@ export class Ledger {
         savedUsd,
         breaks,
       },
+      escalations,
       totalUsd,
       totalMs,
       offloadedUsdEstimate: offloaded,
     };
   }
 
-  format(driverRates?: { in: number; out: number }): string {
-    const s = this.summary(driverRates);
+  format(thinkRates?: { in: number; out: number }): string {
+    const s = this.summary(thinkRates);
     const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
     const usd = (n: number) => `$${n.toFixed(4)}`;
     const lines: string[] = [];
@@ -201,6 +218,12 @@ export class Ledger {
       lines.push(`  ! ${s.cache.breaks.length} prefix break(s):`);
       for (const b of s.cache.breaks.slice(0, 5)) {
         lines.push(`      ${b.slot} on ${b.model} at message ${b.at}`);
+      }
+    }
+    if (s.escalations > 0) {
+      lines.push(`  ! ${s.escalations} escalation(s):`);
+      for (const r of this.records.filter((r) => r.escalated).slice(0, 5)) {
+        lines.push(`      ${r.slot} -> ${r.model.id} (${r.routeReason ?? ""})`);
       }
     }
     for (const [slot, v] of Object.entries(s.bySlot)) {

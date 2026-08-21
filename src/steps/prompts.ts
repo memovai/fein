@@ -30,7 +30,7 @@ import { SystemPromptBuilder } from "./sections.js";
  *   tier 2  project context + skill index       ← stable per run, cached
  *   ─────── everything volatile lives past here, as appended messages ───────
  */
-export interface DriverSystemOptions {
+export interface ThinkSystemOptions {
   workspace: string;
   extra?: string;
   hybrid: boolean;
@@ -42,23 +42,25 @@ export interface DriverSystemOptions {
   skillIndex?: string;
   memory?: boolean;
   subagents?: boolean;
+  /** True when the execute slot is bound: enables the plan-execute guidance. */
+  tiers?: boolean;
 }
 
 /**
- * Build the driver's system prompt as named sections.
+ * Build the think model's system prompt as named sections.
  *
  * Returning the builder rather than a string is the point: the caller gets a
  * fingerprint it can check for drift, and every part of the prompt carries a
  * declared lifetime instead of an implied one.
  */
-export function driverSections(opts: DriverSystemOptions): SystemPromptBuilder {
+export function thinkSections(opts: ThinkSystemOptions): SystemPromptBuilder {
   const b = new SystemPromptBuilder();
 
   b.add(
     "identity",
     "frozen",
     [
-      "You are FE!N, a hybrid agent harness. You are the driver: you decide what happens next.",
+      "You are FE!N, a hybrid agent harness. You are the think model: you decide what happens next.",
       "",
       "Work in small, verifiable steps. Call tools to gather facts rather than guessing.",
       "When the task is complete, reply with a short summary and no tool calls.",
@@ -104,6 +106,18 @@ export function driverSections(opts: DriverSystemOptions): SystemPromptBuilder {
         "Do that when the sub-task would flood your context with material you will not need",
         "again, or when independent tracks can run separately. Do not delegate work you could",
         "finish in a few tool calls — each spawn re-establishes context from nothing.",
+        ...(opts.tiers
+          ? [
+              "",
+              "For a multi-step task, plan before you spawn: name each step and give it",
+              "acceptance criteria. Spawn the light tier for mechanical steps — search,",
+              "extraction, bulk edits against a clear spec — and the heavy tier when a step",
+              "needs judgment. Independent steps can be spawned in the same turn. If a step",
+              "reports it is stuck or misses its acceptance criteria, change something —",
+              "escalate the tier, re-split the step, or do it yourself. Never respawn the",
+              "same thing unchanged.",
+            ]
+          : []),
       ].join("\n"),
     );
   }
@@ -117,8 +131,8 @@ export function driverSections(opts: DriverSystemOptions): SystemPromptBuilder {
 }
 
 /** Convenience for callers that only want the rendered string. */
-export function driverSystem(opts: DriverSystemOptions): string {
-  return driverSections(opts).build();
+export function thinkSystem(opts: ThinkSystemOptions): string {
+  return thinkSections(opts).build();
 }
 
 /**

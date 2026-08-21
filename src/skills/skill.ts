@@ -158,7 +158,7 @@ export function readSkillTool(library: SkillLibrary): Tool {
  *
  * This is the half that makes skills compound rather than merely exist. It is
  * marked `sideEffects` so that, under FE!N's trust tiers, a locally-delegated
- * call to it must pass the verifier: a small model writing durable
+ * call to it must pass the verify model: a small model writing durable
  * instructions that will steer every future session is exactly the kind of
  * unrecoverable action the tier system is for.
  */

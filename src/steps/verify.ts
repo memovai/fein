@@ -11,11 +11,11 @@ export interface Verdict {
 }
 
 /**
- * The verifier gates world-changing calls made by a **subagent**.
+ * The verify model gates world-changing calls made by a **subagent**.
  *
  * The asymmetry it exists for:
  *
- *   A call the driver makes is the driver acting on the user's instruction.
+ *   A call the think model makes is the think model acting on the user's instruction.
  *   A call a subagent makes is an agent acting on a task string that *another
  *   model* wrote. No human ever approved those exact words.
  *
@@ -31,10 +31,10 @@ export interface Verdict {
  * not pay for one. Use hooks for "never run rm -rf"; use this for "does this
  * call still resemble what was asked".
  *
- * Deliberately bindable to any model. Bind it to the cloud driver for a
+ * Deliberately bindable to any model. Bind it to the cloud think model for a
  * careful gate — it only fires on subagent mutations, so it is rare and its
  * cost is negligible. Bind nothing and subagent mutations run ungated, which
- * is why the loop only consults it when a verifier is actually bound.
+ * is why the loop only consults it when a verify model is actually bound.
  *
  * An unparseable verdict is a denial. Ambiguous safety signals are not
  * permission.
@@ -48,11 +48,11 @@ export async function verify(args: {
   intent: string;
   signal?: AbortSignal;
 }): Promise<Verdict> {
-  if (!args.router.has("verifier")) {
+  if (!args.router.has("verify")) {
     return {
       allow: false,
       reason:
-        "a subagent proposed a side-effecting call but no verifier is bound; " +
+        "a subagent proposed a side-effecting call but no verify model is bound; " +
         "refusing to execute unchecked",
       servedBy: "harness",
     };
@@ -60,7 +60,7 @@ export async function verify(args: {
 
   const channel = args.transcript.newSideChannel("verify");
   const { result, port } = await args.router.run(
-    "verifier",
+    "verify",
     {
       system: VERIFIER_SYSTEM,
       messages: [
@@ -82,8 +82,8 @@ export async function verify(args: {
     },
     args.signal,
   );
-  args.ledger.record("verifier", port.info, result);
-  args.transcript.assistant(result.text, [], `verifier@${port.info.id}`, channel);
+  args.ledger.record("verify", port.info, result);
+  args.transcript.assistant(result.text, [], `verify@${port.info.id}`, channel);
 
   const parsed = extractVerdict(result.text);
   return { ...parsed, servedBy: port.info.id };
@@ -102,5 +102,5 @@ function extractVerdict(text: string): { allow: boolean; reason: string } {
     }
   }
   // Unparseable verdict fails closed. An ambiguous safety signal is a denial.
-  return { allow: false, reason: `verifier returned an unparseable verdict: ${text.slice(0, 160)}` };
+  return { allow: false, reason: `verify model returned an unparseable verdict: ${text.slice(0, 160)}` };
 }

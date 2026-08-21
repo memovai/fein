@@ -11,8 +11,9 @@ import {
   findOrphanResults,
 } from "../context/repair.js";
 import { spill, headTail, FileSpillStore, DEFAULT_SPILL_POLICY } from "../context/spill.js";
-import { digest, chunkByLines, DEFAULT_DIGEST_POLICY } from "../steps/digester.js";
+import { digest, chunkByLines, DEFAULT_DIGEST_POLICY } from "../steps/observe.js";
 import { Router } from "../models/router.js";
+import { escalateOnReject } from "../models/policy.js";
 import { ScriptedPort, estimateTokens } from "../models/providers/scripted.js";
 import { Ledger } from "../telemetry/ledger.js";
 import { SessionStore } from "../session/store.js";
@@ -26,7 +27,7 @@ test("an interrupted session is unresumable without repair", () => {
   // The exact shape a crash leaves behind: assistant asked, process died.
   const t = new Transcript();
   t.user("go");
-  t.assistant("working", [{ id: "a", name: "read_file", args: {} }], "driver@x");
+  t.assistant("working", [{ id: "a", name: "read_file", args: {} }], "think@x");
 
   const unpaired = findUnpairedCalls(t.channel("main"));
   assert.equal(unpaired.length, 1, "the call has no result — every provider rejects this");
@@ -39,7 +40,7 @@ test("repair backfills unanswered calls as real, honest events", () => {
   t.assistant("", [
     { id: "a", name: "read_file", args: {} },
     { id: "b", name: "shell", args: {} },
-  ], "driver@x");
+  ], "think@x");
 
   const report = repairTranscript(t);
   assert.equal(report.backfilled.length, 2);
@@ -61,7 +62,7 @@ test("repair backfills unanswered calls as real, honest events", () => {
 test("repair is idempotent — resuming twice adds nothing", () => {
   const t = new Transcript();
   t.user("go");
-  t.assistant("", [{ id: "a", name: "x", args: {} }], "driver@x");
+  t.assistant("", [{ id: "a", name: "x", args: {} }], "think@x");
 
   repairTranscript(t);
   const afterFirst = t.channel("main").length;
@@ -74,7 +75,7 @@ test("repair is idempotent — resuming twice adds nothing", () => {
 test("repair leaves a clean session untouched", () => {
   const t = new Transcript();
   t.user("go");
-  t.assistant("", [{ id: "a", name: "x", args: {} }], "driver@x");
+  t.assistant("", [{ id: "a", name: "x", args: {} }], "think@x");
   t.toolResult({ callId: "a", content: "done", isError: false });
 
   const before = t.channel("main").length;
@@ -100,7 +101,7 @@ test("resume repairs automatically, and reports what it fixed", () => {
   const store = new SessionStore(":memory:");
   const s = PersistentSession.create(store, { title: "crashed" });
   s.transcript.user("go");
-  s.transcript.assistant("", [{ id: "a", name: "shell", args: {} }], "driver@x");
+  s.transcript.assistant("", [{ id: "a", name: "shell", args: {} }], "think@x");
 
   const resumed = PersistentSession.resume(store, s.id);
   assert.equal(resumed.lastRepair.backfilled.length, 1);
@@ -146,7 +147,7 @@ test("the full text is retrievable — spill is lossless", async () => {
     policy: { ...DEFAULT_SPILL_POLICY, maxInlineBytes: 800 },
   });
 
-  // The preview misses the middle — which is precisely why the digester still
+  // The preview misses the middle — which is precisely why the observe model still
   // earns its inference. Spill guarantees bounded and retrievable, not smart.
   assert.doesNotMatch(out.content!, /NEEDLE_IN_THE_MIDDLE/);
   assert.match(await readFile(out.path!, "utf8"), /NEEDLE_IN_THE_MIDDLE/);
@@ -267,7 +268,7 @@ test("headTail never splits a surrogate pair", () => {
   }
 });
 
-// ── digestion respects the digester's window ────────────────────────────────
+// ── digestion respects the observe model's window ────────────────────────────────
 
 test("chunkByLines splits on line boundaries and never mangles a line", () => {
   const text = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n");
@@ -284,7 +285,7 @@ test("chunkByLines splits on line boundaries and never mangles a line", () => {
   assert.equal(chunkByLines("x".repeat(4000), 10).length, 1);
 });
 
-test("a local digester never exceeds its own context window (regression)", async () => {
+test("a local observe model never exceeds its own context window (regression)", async () => {
   // Before: the whole result went to whatever model was bound. A 200k log to a
   // 32k local model fails, falls back to cloud, and sends 200k tokens there —
   // spending real money to save tokens.
@@ -315,7 +316,7 @@ test("a local digester never exceeds its own context window (regression)", async
   });
 
   const out = await digest({
-    router: new Router().bind("digester", local, { fallbacks: [cloud] }),
+    router: new Router().bind("observe", local, { fallbacks: [cloud] }),
     ledger: new Ledger(),
     transcript: new Transcript(),
     result: { callId: "x", content: huge, isError: false },
@@ -327,8 +328,8 @@ test("a local digester never exceeds its own context window (regression)", async
   assert.equal(cloudCalls, 0, "it must not fall back to the expensive model");
 });
 
-test("a cloud digester declines chunked work rather than overpaying", async () => {
-  // Spill already bounds what the driver sees, for free. So chunked cloud
+test("a cloud observe model declines chunked work rather than overpaying", async () => {
+  // Spill already bounds what the think model sees, for free. So chunked cloud
   // digestion competes with an 8KB preview, not with 200k raw tokens — and
   // several full-price calls do not repay that within a session.
   let calls = 0;
@@ -346,7 +347,7 @@ test("a cloud digester declines chunked work rather than overpaying", async () =
   const ledger = new Ledger();
 
   const out = await digest({
-    router: new Router().bind("digester", cloud),
+    router: new Router().bind("observe", cloud),
     ledger,
     transcript: new Transcript(),
     result: { callId: "x", content: "line of output\n".repeat(30000), isError: false },
@@ -357,7 +358,7 @@ test("a cloud digester declines chunked work rather than overpaying", async () =
   assert.equal(calls, 0, "not one call, let alone several");
   assert.equal(ledger.summary().totalUsd, 0);
   assert.match(out.skipReason!, /spill already bounds/);
-  assert.match(out.skipReason!, /local digester/, "the message says what to do instead");
+  assert.match(out.skipReason!, /local observe model/, "the message says what to do instead");
 });
 
 test("an explicit maxChunks overrides the cloud default", async () => {
@@ -373,7 +374,7 @@ test("an explicit maxChunks overrides the cloud default", async () => {
   });
 
   const out = await digest({
-    router: new Router().bind("digester", cloud),
+    router: new Router().bind("observe", cloud),
     ledger: new Ledger(),
     transcript: new Transcript(),
     result: { callId: "x", content: "line of output\n".repeat(20000), isError: false },
@@ -386,8 +387,121 @@ test("an explicit maxChunks overrides the cloud default", async () => {
   assert.match(out.text!, /not summarized/, "and still says what it skipped");
 });
 
+// ── escalate-on-reject: the quality gate as a cascade scorer ─────────────────
+
+test("a rejected local digest escalates once to the cloud and lands", async () => {
+  const content = "x".repeat(4000); // ~1000 tokens, one chunk on every port
+  const local = new ScriptedPort({
+    id: "local",
+    locality: "local",
+    contextWindow: 32_768,
+    // Near-verbatim: ~900 tokens >= 70% of the original, so the gate rejects it.
+    handler: () => ({ text: "y".repeat(3600) }),
+  });
+  let cloudCalls = 0;
+  const cloud = new ScriptedPort({
+    id: "cloud",
+    locality: "cloud",
+    contextWindow: 200_000,
+    costPerMTokIn: 3,
+    costPerMTokOut: 15,
+    handler: () => {
+      cloudCalls++;
+      return { text: "the one line that mattered" };
+    },
+  });
+  const ledger = new Ledger();
+
+  const out = await digest({
+    router: new Router().bind("observe", local, {
+      fallbacks: [cloud],
+      policy: escalateOnReject({ to: cloud }),
+    }),
+    ledger,
+    transcript: new Transcript(),
+    result: { callId: "x", content, isError: false },
+    toolName: "shell",
+  });
+
+  assert.equal(out.digested, true);
+  assert.equal(out.servedBy, "cloud");
+  assert.equal(out.escalated, true);
+  assert.equal(cloudCalls, 1, "one retry, not a loop");
+  const s = ledger.summary();
+  assert.equal(s.bySlot["observe"]!.calls, 2, "both attempts are billed — the cascade's honest price");
+  assert.equal(s.escalations, 1);
+});
+
+test("without a policy a rejected digest keeps the original — fallbacks are for exceptions", async () => {
+  const content = "x".repeat(4000);
+  const local = new ScriptedPort({
+    id: "local",
+    locality: "local",
+    contextWindow: 32_768,
+    handler: () => ({ text: "y".repeat(3600) }),
+  });
+  let cloudCalls = 0;
+  const cloud = new ScriptedPort({
+    id: "cloud",
+    locality: "cloud",
+    handler: () => {
+      cloudCalls++;
+      return { text: "short" };
+    },
+  });
+
+  const out = await digest({
+    router: new Router().bind("observe", local, { fallbacks: [cloud] }),
+    ledger: new Ledger(),
+    transcript: new Transcript(),
+    result: { callId: "x", content, isError: false },
+    toolName: "shell",
+  });
+
+  assert.equal(out.digested, false);
+  assert.equal(cloudCalls, 0, "a quality reject must not trip the exception-fallback chain");
+  assert.match(out.skipReason!, /not meaningfully smaller/);
+});
+
+test("reject escalation declines work that would need chunked cloud calls", async () => {
+  // ~1500 tokens across many lines: one chunk for the local window, several for
+  // the small cloud window below — so escalation must refuse, same economics as
+  // the cloud chunk cap.
+  const content = "line of output\n".repeat(400);
+  const local = new ScriptedPort({
+    id: "local",
+    locality: "local",
+    contextWindow: 32_768,
+    handler: () => ({ text: content }), // verbatim: always rejected
+  });
+  let cloudCalls = 0;
+  const cloud = new ScriptedPort({
+    id: "cloud",
+    locality: "cloud",
+    contextWindow: 2000,
+    handler: () => {
+      cloudCalls++;
+      return { text: "short" };
+    },
+  });
+
+  const out = await digest({
+    router: new Router().bind("observe", local, {
+      fallbacks: [cloud],
+      policy: escalateOnReject({ to: cloud }),
+    }),
+    ledger: new Ledger(),
+    transcript: new Transcript(),
+    result: { callId: "x", content, isError: false },
+    toolName: "shell",
+  });
+
+  assert.equal(out.digested, false);
+  assert.equal(cloudCalls, 0, "escalating a chunked job to the cloud never happens implicitly");
+});
+
 test("a single-chunk result still digests on cloud", async () => {
-  // The decline is about *chunking*, not about cloud digesters in general.
+  // The decline is about *chunking*, not about cloud observe models in general.
   let calls = 0;
   const cloud = new ScriptedPort({
     id: "cloud",
@@ -399,7 +513,7 @@ test("a single-chunk result still digests on cloud", async () => {
     },
   });
   const out = await digest({
-    router: new Router().bind("digester", cloud),
+    router: new Router().bind("observe", cloud),
     ledger: new Ledger(),
     transcript: new Transcript(),
     result: { callId: "x", content: bulk(400), isError: false },
@@ -414,7 +528,7 @@ test("a single-chunk result still digests on cloud", async () => {
 test("lens prefers digest, falls back to preview, and always offers the locator", () => {
   const t = new Transcript();
   t.user("go");
-  t.assistant("", [{ id: "a", name: "shell", args: {} }], "driver@x");
+  t.assistant("", [{ id: "a", name: "shell", args: {} }], "think@x");
   const ev = t.toolResult({ callId: "a", content: bulk(500), isError: false });
   t.spill(ev.id, "HEAD…TAIL", "/tmp/spill/full.txt", 20000);
 
@@ -425,7 +539,7 @@ test("lens prefers digest, falls back to preview, and always offers the locator"
 
   // Add a digest: semantics win, but the locator survives so the model can
   // recover whatever the summary dropped.
-  t.digest(ev.id, "one test failed", "digester@local");
+  t.digest(ev.id, "one test failed", "observe@local");
   const digested = new MainLens(true).render(t).find((m) => m.role === "tool");
   assert.ok(digested && digested.role === "tool");
   assert.match(digested.results[0]!.content, /one test failed/);

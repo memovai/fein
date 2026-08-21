@@ -5,7 +5,7 @@ import { Ledger } from "../telemetry/ledger.js";
 import { Router } from "../models/router.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { defaultTools } from "../tools/builtin.js";
-import { digest, DEFAULT_DIGEST_POLICY, type DigestPolicy } from "../steps/digester.js";
+import { digest, DEFAULT_DIGEST_POLICY, type DigestPolicy } from "../steps/observe.js";
 import {
   spill,
   FileSpillStore,
@@ -13,8 +13,8 @@ import {
   type SpillPolicy,
   type SpillStore,
 } from "../context/spill.js";
-import { verify } from "../steps/verifier.js";
-import { driverSections } from "../steps/prompts.js";
+import { verify } from "../steps/verify.js";
+import { thinkSections } from "../steps/prompts.js";
 import { subagentTool, SpawnBudget, DEFAULT_SUBAGENT_OPTIONS, type SubagentOptions } from "../steps/subagent.js";
 import { estimateTokens } from "../models/providers/scripted.js";
 import { CacheKeeper } from "../cache/keeper.js";
@@ -24,7 +24,7 @@ import { SteeringQueue, formatSteers } from "./steering.js";
 import { scanForVolatileContent, type SectionFingerprint } from "../steps/sections.js";
 import type { SkillLibrary } from "../skills/skill.js";
 import type { PersistentSession } from "../session/persist.js";
-import type { ChatMessage, ToolCall, ToolResult, ToolSpec } from "./types.js";
+import type { ChatMessage, RouteHints, StepName, ToolCall, ToolResult, ToolSpec } from "./types.js";
 
 export interface AgentOptions {
   router: Router;
@@ -38,10 +38,10 @@ export interface AgentOptions {
   spillPolicy?: SpillPolicy | false;
   /** Where spilled text lives. Defaults to `<cwd>/.fein/spill`. */
   spillDir?: string;
-  /** Fraction of the driver's context window at which we compact. */
+  /** Fraction of the think model's context window at which we compact. */
   compactAt?: number;
   /**
-   * Keep the driver's prompt cache warm while the user is idle. Costs a real
+   * Keep the think model's prompt cache warm while the user is idle. Costs a real
    * (tiny) API call per refresh; see CacheKeeper for the trade-off. Off by
    * default because spending money on the user's behalf while they are not
    * looking should be opt-in.
@@ -65,6 +65,26 @@ export interface AgentOptions {
   depth?: number;
   /** Loop-hygiene thresholds: repeated calls, oscillation, stalling. */
   guards?: GuardOptions;
+  /**
+   * Which slot serves this agent's own turns. Defaults to "think".
+   *
+   * The zero-cache-cost model switch: a subagent starts from a fresh context,
+   * so pointing a lightweight child at a cheaper binding (via
+   * `subagents.thinkSlot`) routes the whole sub-task without breaking any
+   * prefix. Small models drive tool-calling APIs badly and fail silently —
+   * when the slot resolves to a small model, bind it with
+   * `toolDialect: "react"` (see localOnlyProfile).
+   */
+  thinkSlot?: StepName;
+  /**
+   * Stop and report on the first loop-guard fire instead of nudging and
+   * grinding on. Code-enforced fail-fast for cheap delegated executors: a
+   * small model that has started repeating itself rarely recovers within its
+   * step budget, and the caller — who can replan or escalate — should get the
+   * blockage report while it is still cheap. Set automatically for light-tier
+   * subagents; off for interactive parents, whose nudge often works.
+   */
+  bailOnStuck?: boolean;
   /**
    * Shared spawn allowance for the whole run.
    *
@@ -98,6 +118,7 @@ export type FeinTrace =
   | { type: "turn_end"; n: number; acted: boolean }
   | { type: "thought"; text: string }
   | { type: "guard"; kind: string; message: string }
+  | { type: "route"; slot: string; model: string; reason: string; thinking?: string }
   | { type: "prompt_warning"; message: string }
   | { type: "done"; text: string };
 
@@ -130,21 +151,21 @@ const CHILD_NEVER_INHERITS = {
 export interface RunResult {
   text: string;
   steps: number;
-  stoppedBecause: "final_answer" | "max_steps";
+  stoppedBecause: "final_answer" | "max_steps" | "stuck";
 }
 
 /**
  * The FE!N agent loop.
  *
- * The loop itself is deliberately boring: render, ask the driver, execute
+ * The loop itself is deliberately boring: render, ask the think model, execute
  * tools, ingest results, repeat. All of FE!N's opinions live in *who* answers
  * each of those questions and *how the record is maintained between them*:
  *
  *   render   -> MainLens, which guarantees prefix monotonicity
- *   ask      -> Router, which resolves the "driver" slot to any model
- *   tools    -> the driver's own calls, gated by hooks and (for subagents)
- *               by the verifier
- *   ingest   -> the digester, which compresses before first render
+ *   ask      -> Router, which resolves the "think" slot to any model
+ *   tools    -> the think model's own calls, gated by hooks and (for subagents)
+ *               by the verify model
+ *   ingest   -> the observe model, which compresses before first render
  *
  * Swap any of those bindings and the loop does not change. That is the whole
  * thesis: the model is a component of the loop, not the loop's owner.
@@ -177,6 +198,11 @@ export class Agent {
   private readonly lens: MainLens;
   private readonly guard = new PrefixGuard();
   private readonly loopGuard: LoopGuard;
+  /** Guard fires this run. Feeds "stuck" pressure to the think routing policy. */
+  private stuckCount = 0;
+  /** The slot serving this agent's own turns. "think" unless the spawner said otherwise. */
+  private readonly thinkSlot: StepName;
+  private readonly bailOnStuck: boolean;
   private readonly steering = new SteeringQueue();
   /** The options this agent was built from, so a child can inherit them. */
   private readonly opts: AgentOptions;
@@ -207,7 +233,7 @@ export class Agent {
    * then trust the provider and use the estimate solely for the *delta* since.
    */
   private lastRealPromptTokens = 0;
-  /** The instruction this agent is working on — the verifier checks against it. */
+  /** The instruction this agent is working on — the verify model checks against it. */
   private task = "";
 
   constructor(opts: AgentOptions) {
@@ -228,6 +254,8 @@ export class Agent {
     this.onEvent = opts.onEvent ?? (() => {});
     this.hooks = opts.hooks ?? new HookRunner();
     this.loopGuard = new LoopGuard(opts.guards ?? {});
+    this.thinkSlot = opts.thinkSlot ?? "think";
+    this.bailOnStuck = opts.bailOnStuck ?? false;
     // The root creates the budget; children inherit the same object by spread,
     // which is exactly the sharing this needs.
     this.spawnBudget =
@@ -268,6 +296,19 @@ export class Agent {
           const child = new Agent({
             ...this.opts,
             ...CHILD_NEVER_INHERITS,
+            // The one safe model-switch point: the child's context is fresh,
+            // so re-pointing its turns at a cheaper binding breaks no prefix.
+            // Precedence mirrors the industry pattern: the LLM's per-spawn
+            // tier choice beats the static subagents.thinkSlot config, which
+            // beats inheriting the parent's own slot.
+            ...(opts.subagents && opts.subagents.thinkSlot
+              ? { thinkSlot: opts.subagents.thinkSlot }
+              : {}),
+            ...(a.tier === "light"
+              ? { thinkSlot: "execute" as const, bailOnStuck: true }
+              : a.tier === "heavy"
+                ? { thinkSlot: this.thinkSlot, bailOnStuck: false }
+                : {}),
             // Shared *by reference*, not inherited by value. A child that
             // builds its own budget turns the run-level cap into a per-subtree
             // cap — which is precisely the explosion it exists to prevent
@@ -285,7 +326,7 @@ export class Agent {
           const r = await child.run(a.task);
           // Costs roll up: a subagent's spend is the parent's spend.
           this.ledger.absorb(child.ledger);
-          return { text: r.text, steps: r.steps };
+          return { text: r.text, steps: r.steps, stoppedBecause: r.stoppedBecause };
         },
       });
       if (tool) this.tools.register(tool);
@@ -297,11 +338,15 @@ export class Agent {
     // impossible rather than merely discouraged. Note what is *absent*: no
     // timestamp, no step counter, no memory snapshot. Those go in appended
     // system-role messages instead (see injectContext).
-    const sections = driverSections({
+    const sections = thinkSections({
       workspace: this.cwd,
-      hybrid: this.router.has("digester"),
+      hybrid: this.router.has("observe"),
       memory: opts.session !== undefined,
       subagents: opts.subagents !== false && this.tools.get("spawn_subagent") !== undefined,
+      tiers:
+        opts.subagents !== false &&
+        this.tools.get("spawn_subagent") !== undefined &&
+        this.router.has("execute"),
       ...(opts.skills ? { skillIndex: opts.skills.index() } : {}),
       ...(opts.identity ? { identity: opts.identity } : {}),
       ...(opts.projectContext ? { projectContext: opts.projectContext } : {}),
@@ -319,13 +364,13 @@ export class Agent {
     this.toolSpecs = this.tools.specs();
     this.tools.freeze();
 
-    // The digester's lens substitution only makes sense if a digester exists.
-    this.lens = new MainLens(this.router.has("digester"));
+    // The observe model's lens substitution only makes sense if an observe model exists.
+    this.lens = new MainLens(this.router.has("observe"));
 
     const warm = opts.keepCacheWarm;
     this.keeper = warm
       ? new CacheKeeper({
-          port: this.router.portFor("driver"),
+          port: this.router.portFor(this.thinkSlot),
           ledger: this.ledger,
           ...(typeof warm === "object" ? warm : {}),
           onRefresh: (n, cacheReadTokens) =>
@@ -405,10 +450,27 @@ export class Agent {
         hadAnswer: false,
       });
       if (signalOut) {
+        this.onEvent({ type: "guard", kind: signalOut.kind, message: signalOut.message });
+        if (this.bailOnStuck) {
+          // Fail fast: report the blockage instead of grinding. The caller
+          // (a planner holding the step's acceptance criteria) decides what
+          // happens next — retry heavier, replan, or do it itself.
+          return await this.forceFinalAnswer(signal, {
+            note:
+              "You appear to be repeating yourself without making progress, and you should " +
+              "stop here. Report what you established, what you tried, and what is blocking " +
+              "you. Do not claim the task is complete.",
+            why: "stuck",
+          });
+        }
         // Delivered as an appended system-role note: free against the cache,
         // and it cannot be forged by anything that lands in tool output.
         this.transcript.systemNote(signalOut.message);
-        this.onEvent({ type: "guard", kind: signalOut.kind, message: signalOut.message });
+        // Also reported to the think binding's routing policy (if one is
+        // bound) as "stuck" pressure. Sticky for the rest of the run: the
+        // count only rises, so escalation never flaps. Derivable from the
+        // system notes above, which keeps replays honest.
+        this.stuckCount++;
       }
     }
 
@@ -416,6 +478,13 @@ export class Agent {
     // worst option: it is usually a fragment of reasoning about a step that
     // never completed. Ask for a real answer instead.
     return await this.forceFinalAnswer(signal);
+  }
+
+  /** Pressure facts for the think binding's routing policy, if one is bound. */
+  private thinkHints(): RouteHints {
+    return this.stuckCount > 0
+      ? { pressure: "stuck", pressureCount: this.stuckCount }
+      : {};
   }
 
   /** One model turn: render, ask, record. */
@@ -436,10 +505,10 @@ export class Agent {
       ...(prefix.brokenAt !== undefined ? { brokenAt: prefix.brokenAt } : {}),
     });
 
-    await this.hooks.beforeModel(this.hookCtx(turn), "driver", messages);
+    await this.hooks.beforeModel(this.hookCtx(turn), this.thinkSlot, messages);
 
-    const { result, port } = await this.router.run(
-      "driver",
+    const { result, port, decision } = await this.router.run(
+      this.thinkSlot,
       {
         system: this.systemPrompt,
         messages,
@@ -448,16 +517,26 @@ export class Agent {
         ...(this.cacheScope() ? { cacheScope: this.cacheScope()! } : {}),
       },
       signal,
+      this.thinkHints(),
     );
-    this.ledger.record("driver", port.info, result, prefix);
+    this.ledger.record(this.thinkSlot, port.info, result, prefix, decision);
+    if (decision?.escalated) {
+      this.onEvent({
+        type: "route",
+        slot: this.thinkSlot,
+        model: port.info.id,
+        reason: decision.reason,
+        ...(decision.thinking ? { thinking: decision.thinking } : {}),
+      });
+    }
     // Cached reads still occupied the window, so the true prompt size is
     // fresh + cached, not just what we were billed at full rate.
     this.lastRealPromptTokens = result.usage.inputTokens + result.usage.cacheReadTokens;
-    await this.hooks.afterModel(this.hookCtx(turn), "driver", result.text);
+    await this.hooks.afterModel(this.hookCtx(turn), this.thinkSlot, result.text);
     this.onEvent({
       type: "step",
       n: turn,
-      slot: "driver",
+      slot: this.thinkSlot,
       model: port.info.id,
       locality: port.info.locality,
     });
@@ -465,7 +544,7 @@ export class Agent {
     this.transcript.assistant(
       result.text,
       result.toolCalls,
-      `driver@${port.info.id}`,
+      `${this.thinkSlot}@${port.info.id}`,
       "main",
       result.reasoning,
     );
@@ -488,7 +567,10 @@ export class Agent {
    * to would be a request; removing the capability is a guarantee — the same
    * reasoning as the subagent depth cap.
    */
-  private async forceFinalAnswer(signal?: AbortSignal): Promise<RunResult> {
+  private async forceFinalAnswer(
+    signal?: AbortSignal,
+    opts?: { note: string; why: RunResult["stoppedBecause"] },
+  ): Promise<RunResult> {
     // A steer typed during the final turn would otherwise sit in the queue
     // until some later run — the user's last words silently not applied to the
     // answer they were aimed at. Deliver them before asking for the wrap-up.
@@ -499,34 +581,36 @@ export class Agent {
     }
 
     this.transcript.systemNote(
-      `You have used all ${this.maxSteps} available turns and cannot take further actions. ` +
-        `Answer now with what you have established. State what you found, and say plainly ` +
-        `what is still unresolved rather than implying the task is complete.`,
+      opts?.note ??
+        `You have used all ${this.maxSteps} available turns and cannot take further actions. ` +
+          `Answer now with what you have established. State what you found, and say plainly ` +
+          `what is still unresolved rather than implying the task is complete.`,
     );
 
     const messages = this.lens.render(this.transcript);
     try {
-      const { result, port } = await this.router.run(
-        "driver",
+      const { result, port, decision } = await this.router.run(
+        this.thinkSlot,
         { system: this.systemPrompt, messages, cacheAnchors: ["system", "lastMessage"] },
         signal,
+        this.thinkHints(),
       );
-      this.ledger.record("driver", port.info, result);
+        this.ledger.record(this.thinkSlot, port.info, result, undefined, decision);
       this.transcript.assistant(
         result.text,
         [],
-        `driver@${port.info.id}`,
+        `${this.thinkSlot}@${port.info.id}`,
         "main",
         result.reasoning,
       );
       if (result.text.trim()) this.onEvent({ type: "text", text: result.text });
-      return await this.finish(result.text, this.maxSteps, "max_steps", messages);
+      return await this.finish(result.text, this.maxSteps, opts?.why ?? "max_steps", messages);
     } catch {
       // The wrap-up call is a courtesy, not a requirement. If it fails, fall
       // back to the old behaviour rather than losing the whole run.
       const last = this.lastAssistantText();
       this.running = false;
-      return { text: last, steps: this.maxSteps, stoppedBecause: "max_steps" };
+      return { text: last, steps: this.maxSteps, stoppedBecause: opts?.why ?? "max_steps" };
     }
   }
 
@@ -569,13 +653,13 @@ export class Agent {
   }
 
   /**
-   * Execute a batch of tool calls from one driver turn.
+   * Execute a batch of tool calls from one think model turn.
    *
    * Two rules, both of which exist because of hybrid execution rather than in
    * spite of it:
    *
    * **Results are appended in call order, never completion order.** When the
-   * driver issues three calls and we run them concurrently, they finish in
+   * think model issues three calls and we run them concurrently, they finish in
    * whatever order the filesystem and the local model feel like. Appending in
    * completion order makes the transcript — and therefore the prompt prefix —
    * depend on machine timing. The same session replayed twice would produce
@@ -655,6 +739,14 @@ export class Agent {
           to: outcome.digestTokens ?? 0,
           servedBy: outcome.servedBy ?? "unknown",
         });
+        if (outcome.escalated) {
+          this.onEvent({
+            type: "route",
+            slot: "observe",
+            model: outcome.servedBy ?? "unknown",
+            reason: "quality gate rejected the default port's digest",
+          });
+        }
       }
     }
 
@@ -663,7 +755,7 @@ export class Agent {
 
   /**
    * Bound a result without a model. Free, lossless, and the floor under the
-   * digester: even with no digester bound, no single tool result can flood the
+   * observe: even with no observe model bound, no single tool result can flood the
    * context window, and the full text stays one `grep` away.
    */
   private async maybeSpill(result: ToolResult, toolName: string) {
@@ -686,15 +778,15 @@ export class Agent {
   /**
    * Resolve one call into a concrete tool result.
    *
-   * The trust tier that survives: a call made by the *driver* executes as-is,
-   * because the driver is acting on the user's instruction and is the
+   * The trust tier that survives: a call made by the *think model* executes as-is,
+   * because the think model is acting on the user's instruction and is the
    * authority. A call made inside a **subagent** is acting on a task string
    * that another model wrote — nobody human ever approved those exact words —
-   * so if it mutates the world it goes past the verifier first.
+   * so if it mutates the world it goes past the verify model first.
    *
-   * That asymmetry is the same one that motivated the verifier originally, and
+   * That asymmetry is the same one that motivated the verify model originally, and
    * it is the only one left now that argument-materialization is gone. Hooks
-   * cover rule-shaped policy; the verifier is the model-shaped check for when
+   * cover rule-shaped policy; the verify model is the model-shaped check for when
    * the instruction itself came from a model.
    */
   private async handleCall(
@@ -703,7 +795,7 @@ export class Agent {
   ): Promise<{ result: ToolResult; toolName: string }> {
     const spec = this.tools.get(call.name)?.spec;
 
-    if (this.depth > 0 && spec?.sideEffects && this.router.has("verifier")) {
+    if (this.depth > 0 && spec?.sideEffects && this.router.has("verify")) {
       const verdict = await verify({
         router: this.router,
         ledger: this.ledger,
@@ -724,7 +816,7 @@ export class Agent {
           result: {
             callId: call.id,
             content:
-              `Blocked by the verifier: ${verdict.reason}\n` +
+              `Blocked by the verify model: ${verdict.reason}\n` +
               `This is a subagent, so mutations are checked against the task you were given.`,
             isError: true,
           },
@@ -733,7 +825,7 @@ export class Agent {
       }
     }
 
-    return { result: await this.execute(call, "driver", signal), toolName: call.name };
+    return { result: await this.execute(call, this.thinkSlot, signal), toolName: call.name };
   }
 
   private async execute(call: ToolCall, via: string, signal?: AbortSignal): Promise<ToolResult> {
@@ -783,19 +875,19 @@ export class Agent {
    * many turns. Rare and expensive beats constant and cheap-looking.
    */
   private async maybeCompact(): Promise<void> {
-    const port = this.router.portFor("driver");
+    const port = this.router.portFor(this.thinkSlot);
     // A throwaway lens. `MainLens` freezes every event it renders, because
     // "already shown to the model" is what makes late digest substitution
     // unsafe (Rule 2). But this render is only a size estimate — it never
     // reaches a provider — so using the real lens here would freeze events
-    // the driver has not seen yet, and the digest would silently never apply.
-    const messages = new MainLens(this.router.has("digester")).render(this.transcript);
+    // the think model has not seen yet, and the digest would silently never apply.
+    const messages = new MainLens(this.router.has("observe")).render(this.transcript);
     const approx = this.approxPromptTokens(messages);
     if (approx < port.info.contextWindow * this.compactAt) return;
 
     await this.hooks.beforeCompact(this.hookCtx(this.currentStep), approx);
 
-    const summarySlot = this.router.has("digester") ? "digester" : "driver";
+    const summarySlot = this.router.has("observe") ? "observe" : this.thinkSlot;
     const { result, port: sPort } = await this.router.run(summarySlot, {
       system:
         "Summarize this agent session so work can continue without the full transcript. " +
@@ -872,7 +964,7 @@ export class Agent {
   }
 
   /**
-   * Make a deferred tool visible to the driver, without touching the cache.
+   * Make a deferred tool visible to the think model, without touching the cache.
    *
    * The tool must already have been declared with `deferLoading: true` before
    * the first turn — that is the whole trick. The tool block sits at the very
@@ -886,7 +978,7 @@ export class Agent {
     if (!tool) throw new Error(`cannot surface unknown tool "${name}"`);
     if (!tool.spec.deferLoading) {
       throw new Error(
-        `tool "${name}" is not deferred — it is already visible to the driver. ` +
+        `tool "${name}" is not deferred — it is already visible to the think model. ` +
           `Only tools declared with deferLoading: true need surfacing.`,
       );
     }
@@ -913,8 +1005,8 @@ export class Agent {
     this.transcript.systemNote(text);
   }
 
-  /** Rendered view of what the driver currently sees. For inspection/debug. */
+  /** Rendered view of what the think model currently sees. For inspection/debug. */
   view(): ChatMessage[] {
-    return new MainLens(this.router.has("digester")).render(this.transcript);
+    return new MainLens(this.router.has("observe")).render(this.transcript);
   }
 }

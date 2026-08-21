@@ -19,7 +19,7 @@ tests. Where a design taught us something, it is credited.
 
 **We reach for a model to solve problems that do not need one.**
 
-FE!N's answer to "this tool returned 3000 lines" was always the digester: spend
+FE!N's answer to "this tool returned 3000 lines" was always the observe model: spend
 an inference, get a summary. Both `dsh` and `hermes` treat that as the *second*
 tier, behind model-free mechanisms:
 
@@ -56,17 +56,17 @@ The invariants are ours and are tested:
 **Spill and digest turned out to be complementary rather than competing**, which
 we only saw once both existed. Our own benchmark fixture proves it: a 332-line
 log with the one failure on line 241 — the head/tail preview **misses it**, and
-the digester finds it. Conversely a digest is a paraphrase, and if it drops the
+the observe model finds it. Conversely a digest is a paraphrase, and if it drops the
 line number that detail is gone.
 
 So FE!N now does both, and the lens prefers `digest → preview → raw`:
 
 ```
-no digester bound  →  bounded preview + locator     (was: unbounded raw text)
-digester bound     →  semantic digest + locator     (was: digest, detail gone)
+no observe model bound  →  bounded preview + locator     (was: unbounded raw text)
+observe model bound     →  semantic digest + locator     (was: digest, detail gone)
 ```
 
-The second row is the real win: **spill fixes the digester's worst property.** A
+The second row is the real win: **spill fixes the observe model's worst property.** A
 summary that drops something now has a route back to the source, which turns
 "lossy" into "summarized, with the truth one tool call away."
 

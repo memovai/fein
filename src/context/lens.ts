@@ -17,7 +17,7 @@ import type { Transcript } from "../core/transcript.js";
  * local models — the discipline is provider-agnostic.
  *
  * The subtle case is digestion: a local model may summarize a bulky tool
- * result so the cloud driver reads 200 tokens instead of 20k. That is only
+ * result so the cloud think model reads 200 tokens instead of 20k. That is only
  * cache-safe if the digest is substituted BEFORE the raw result is ever
  * rendered for that binding. This lens tracks which events it has already
  * rendered ("frozen") and refuses to substitute after the fact: a late digest

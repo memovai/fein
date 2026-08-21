@@ -1,4 +1,5 @@
 import { Router } from "../models/router.js";
+import { escalateOnReject, escalateOnStuck } from "../models/policy.js";
 import { AnthropicPort } from "../models/providers/anthropic.js";
 import { OllamaPort } from "../models/providers/ollama.js";
 import { ScriptedPort } from "../models/providers/scripted.js";
@@ -34,7 +35,7 @@ export const CONFIGS: BenchConfig[] = [
     id: "cloud-only",
     hypothesis: "control — everything the frontier model does itself",
     build: ({ cloud }) => ({
-      router: new Router().bind("driver", cloud),
+      router: new Router().bind("think", cloud),
       subagents: false,
     }),
   },
@@ -42,7 +43,7 @@ export const CONFIGS: BenchConfig[] = [
     id: "cloud+subagent",
     hypothesis: "isolation alone: does keeping search out of the parent pay for the spawn floor?",
     build: ({ cloud }) => ({
-      router: new Router().bind("driver", cloud).bind("verifier", cloud),
+      router: new Router().bind("think", cloud).bind("verify", cloud),
       subagents: { maxDepth: 2, maxSpawns: 4, maxSteps: 8 },
     }),
   },
@@ -50,7 +51,7 @@ export const CONFIGS: BenchConfig[] = [
     id: "cloud+local-digest",
     hypothesis: "compression alone: does the digest save money without losing the answer?",
     build: ({ cloud, local }) => ({
-      router: new Router().bind("driver", cloud).bind("digester", local, { fallbacks: [cloud] }),
+      router: new Router().bind("think", cloud).bind("observe", local, { fallbacks: [cloud] }),
       subagents: false,
     }),
   },
@@ -59,9 +60,9 @@ export const CONFIGS: BenchConfig[] = [
     hypothesis: "both — the shipped default",
     build: ({ cloud, local }) => ({
       router: new Router()
-        .bind("driver", cloud)
-        .bind("digester", local, { fallbacks: [cloud] })
-        .bind("verifier", cloud),
+        .bind("think", cloud)
+        .bind("observe", local, { fallbacks: [cloud] })
+        .bind("verify", cloud),
       subagents: { maxDepth: 2, maxSpawns: 4, maxSteps: 8 },
     }),
   },
@@ -69,8 +70,21 @@ export const CONFIGS: BenchConfig[] = [
     id: "local-only",
     hypothesis: "capability floor: can this run with no network at all?",
     build: ({ local }) => ({
-      router: new Router().bind("driver", local).bind("digester", local),
+      router: new Router().bind("think", local).bind("observe", local),
       subagents: false,
+    }),
+  },
+  {
+    id: "hybrid+adaptive",
+    hypothesis:
+      "adaptive routing: do stuck/reject escalations buy success without cost blowup? " +
+      "(offline, where nothing escalates, its delta vs `hybrid` is the mechanism's idle overhead — should be zero)",
+    build: ({ cloud, local }) => ({
+      router: new Router()
+        .bind("think", cloud, { policy: escalateOnStuck() })
+        .bind("observe", local, { fallbacks: [cloud], policy: escalateOnReject({ to: cloud }) })
+        .bind("verify", cloud),
+      subagents: { maxDepth: 2, maxSpawns: 4, maxSteps: 8 },
     }),
   },
 ];
@@ -93,7 +107,7 @@ export function realPorts(opts: { cloudModel: string; localModel: string; apiKey
 /**
  * Scripted ports for the offline run.
  *
- * These measure **mechanism overhead**, not model quality: the scripted driver
+ * These measure **mechanism overhead**, not model quality: the scripted think model
  * always finds the right answer, so `success` is meaningless offline and the
  * report says so. What the offline run *does* measure exactly — and for free,
  * deterministically, in CI — is how many tokens each mechanism costs to have.
@@ -107,7 +121,7 @@ export function scriptedPorts(fixtureLog: string): BenchPorts {
       costPerMTokOut: 15,
       contextWindow: 200_000,
       latencyMs: 5,
-      handler: (req, turn) => scriptedDriver(req, turn, fixtureLog),
+      handler: (req, turn) => scriptedThinker(req, turn, fixtureLog),
     }),
     local: new ScriptedPort({
       id: "local/scripted",
@@ -126,24 +140,24 @@ export function scriptedPorts(fixtureLog: string): BenchPorts {
 }
 
 /**
- * A scripted driver that plays each task correctly.
+ * A scripted think model that plays each task correctly.
  *
  * **Stateless on purpose.** An earlier version branched on a turn counter and
  * produced silently wrong numbers, because `ScriptedPort` counts turns
  * per-instance and the benchmark reuses one instance across configs. Keying off
- * the conversation contents instead makes the driver correct regardless of how
+ * the conversation contents instead makes the think model correct regardless of how
  * many times it has been called, by whom, in what order — which is the only
  * property a benchmark fixture actually needs.
  *
  * It uses read-only tools only, so the benchmark can run with side effects
  * disabled and cannot damage its own fixtures.
  */
-function scriptedDriver(
+function scriptedThinker(
   req: { system: string; messages: ChatMessage[] },
   _turn: number,
   _log: string,
 ): { text: string; toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown> }> } {
-  // Shared-port configs route the digester and verifier here too.
+  // Shared-port configs route the observe model and verify model here too.
   if (req.system.includes("You compress tool output")) {
     return {
       text:

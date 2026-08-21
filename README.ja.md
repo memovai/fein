@@ -12,7 +12,7 @@
 
 FE!N はループを **スロット** に分解し、それぞれに別のモデルを割り当てられるように
 した。フロンティアモデルが考え、手元の 3B モデルが読む。TypeScript 製、
-**ランタイム依存ゼロ**、テスト 160 本。
+**ランタイム依存ゼロ**、テスト 177 本。
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -23,9 +23,9 @@ const cloud = new AnthropicPort({ id: "cloud", model: "claude-sonnet-5",
 const local = new OllamaPort({ id: "local", model: "qwen2.5:3b" });
 
 const router = new Router()
-  .bind("driver",   cloud)                          // 何をするか決める
-  .bind("digester", local, { fallbacks: [cloud] })  // 観測結果を圧縮する
-  .bind("verifier", cloud);                         // サブエージェントの変更を検問する
+  .bind("think",   cloud)                           // 何をするか決める
+  .bind("observe", local, { fallbacks: [cloud] })   // 観測結果を圧縮する
+  .bind("verify",  cloud);                          // サブエージェントの変更を検問する
 
 await new Agent({ router, tools: defaultTools() }).run("テストが失敗する原因は?");
 ```
@@ -44,12 +44,12 @@ npm install && npm run demo
 
 ```
 bindings
-  driver      cloud/sonnet-sim [cloud]
-  digester    local/qwen3b-sim [local] -> cloud/sonnet-sim
+  think       cloud/sonnet-sim [cloud]
+  observe     local/qwen3b-sim [local] -> cloud/sonnet-sim
 
-[2] driver · cloud/sonnet-sim cloud
+[2] think · cloud/sonnet-sim cloud
 TypeScript プロジェクトです。失敗箇所を探すためテストを実行します。
-  tool shell(command: "npm test") via driver
+  tool shell(command: "npm test") via think
        ok $ npm test ok 1 - unit/parser handles case 1 …
   digest shell: 3100 → 43 tok (99% smaller · local/qwen3b-sim)
   cache: prefix stable — 3 msg reused, 2 new
@@ -61,8 +61,8 @@ calls 4  ·  $0.0024  ·  0.2s
   cache  hit 10.1%   saved $0.0011
 ```
 
-`npm test` を実行すると決めたのは driver **自身** — その権限には手を触れていない。
-にもかかわらず driver は 330 行のログを一度も見ていない。ローカルモデルが先に
+`npm test` を実行すると決めたのは think モデル**自身** — その権限には手を触れていない。
+にもかかわらず think モデルは 330 行のログを一度も見ていない。ローカルモデルが先に
 43 トークンへ圧縮したからだ。この節約は残りのターン全体で効き続け、
 コンテキストウィンドウを取り戻し、生ログはこのマシンから出ていかない。
 
@@ -70,17 +70,67 @@ calls 4  ·  $0.0024  ·  0.2s
 
 | スロット | 役割 | なぜ切り離せるのか |
 |---|---|---|
-| `driver` | 次に何をするか決める | 難しい推論。フロンティアのままにする |
-| `digester` | 大量の出力を driver が見る前に圧縮する | 出力が入力より小さく、節約が累積し、生データが機外に出ない |
-| `verifier` | サブエージェントの破壊的な呼び出しを検問する | 稀にしか動かないので、高価でも構わない |
-| `titler` | セッションに名前を付ける | 些細 |
+| `think` | 次に何をするか決める | 難しい推論。フロンティアのままにする |
+| `observe` | 大量の出力を think モデルが見る前に圧縮する | 出力が入力より小さく、節約が累積し、生データが機外に出ない |
+| `verify` | サブエージェントの破壊的な呼び出しを検問する | 稀にしか動かないので、高価でも構わない |
+| `title` | セッションに名前を付ける | 些細 |
+| `execute` | 委任されたサブタスクを最初から最後まで進める | plan-execute 委任の軽量ティア。既定では未割り当て — 未割り当てのスロットは何も公開しない |
+
+名前は ReAct のものだ。Thought → `think` で、Action を出すのもここ —
+ネイティブなツール呼び出しは思考と行動をひとつの補完に融合する。`action`
+スロットが存在しないのは、ツールを実行するのがモデルではなくコードだからだ。
+Observation → `observe`。`verify` と `title` は ReAct にはない制御プレーンの役割である。
 
 どのスロットにもどのモデルでも入る。各スロットはフォールバック連鎖を持つので、
 ローカルのランタイムが落ちてもそのスロットがクラウドに降格するだけで、
 セッション全体は止まらない。
 
-**5 つ目のスロットがあったが、削除した。** `toolformer` は driver の一行の意図を
-具体的な引数へ変換するものだった。実測すると、**呼び出しごとに driver の出力トークンを
+**割り当ては既定では静的で、適応ルーティングはスロットごとのオプトインである。**
+割り当てにはポリシーを持たせられるが、切り替えの根拠はループが報告する事実だけで、
+壁時計や運では決して切り替えない — だから同じトランスクリプトからは同じ決定が
+再導出され、すべての決定はトレースと台帳に残る。
+
+- `escalate-on-stuck`(`think` 用):ループの番人がモデルの堂々巡りに気づく →
+  同じポートのまま、思考の強度だけを上げる。セッション途中のポート交換は決して
+  行わない。プロンプトキャッシュはモデルごとにキーが分かれ、あるモデルの署名付き
+  推論ブロックを別のモデルへ再生するとプロバイダのエラーになるからだ。
+  エスカレーションのつまみは思考強度であって、モデルの交換ではない。
+- `escalate-on-reject`(`observe` 用):品質ゲートに落ちたローカルの digest は、
+  クラウドのポートで 1 回だけ再試行される。observe スロットの呼び出しは毎回
+  新しく小さなコンテキストを持つので、この切り替えにキャッシュの利害は一切ない。
+- `right-size`(補助スロットのみ):ごく小さなリクエストは、スロットの既定が
+  大きなモデルであっても小さなモデルへ送る。
+
+`think` そのものを安全に付け替えられる唯一の場所は **サブエージェント境界** である —
+新規コンテキストなので壊れるものがない。使い方は 2 通りある。
+
+- **静的**:`subagents.thinkSlot` を設定すると、すべての子がその割り当てで動く。
+- **Plan-execute**(`execute` スロットを割り当てると有効になる):spawn ツールに
+  `tier` パラメータが加わり、think モデルがステップごとに埋める — `"light"` は
+  サブタスク全体を execute の割り当てで、`"heavy"` は think モデル自身の割り当てで
+  実行する。`acceptance` パラメータはプランナーに「完了」の意味を明言させ、
+  子はそれに照らして報告する。優先順位は、spawn ごとの指定が `thinkSlot` の設定に
+  勝ち、設定が継承に勝つ。
+
+これを試した先人たち共通の 2 つの教訓は、文章ではなくコードで強制されている。
+堂々巡りを始めた安いモデルが自力で立ち直ることは稀なので、light ティアの子は
+**番人が最初に発火した時点で止まり、何に阻まれたかを報告する** —
+エスカレーションも、再分割も、そのステップを自分でやるのもプランナーであり、
+ハーネスが勝手に経路を変えることはない。また、委任の質はモデルの生の判断ではなく
+分解から生まれるので、tier の指針はツールスキーマと、`execute` が割り当てられて
+いるときにだけ存在する凍結プロンプト区画に置かれる — そうでなければ、
+この機能全体のコストは 0 トークンである。
+
+```jsonc
+// config: the object form of a binding carries the policy
+"bind": {
+  "think":   { "port": "cloud", "policy": { "kind": "escalate-on-stuck" } },
+  "observe": { "port": "local", "policy": { "kind": "escalate-on-reject", "to": "cloud" } }
+}
+```
+
+**もうひとつスロットがあったが、削除した。** `toolformer` は think モデルの一行の意図を
+具体的な引数へ変換するものだった。実測すると、**呼び出しごとに think モデルの出力トークンを
 11〜15 増やし、節約はゼロ**だった — 意図は引数をそのまま含まなければならないので、
 構造上つねに置き換え対象の上位集合になる。数字付きの記録は
 [DESIGN.md](./DESIGN.md) にある。教訓は
@@ -139,13 +189,13 @@ FE!N はプレフィックスの安定性を努力目標ではなく不変条件
 
 この 2 つは補完関係にあり、テストフィクスチャがそれを証明している —
 332 行のログで唯一の失敗が 241 行目にある場合、プレビューは **それを見落とし**、
-digester は見つける。だから両方を走らせ、レンズは
-`digest → preview → raw` の順に優先する。spill は digester の最悪の性質も直す。
+observe モデルは見つける。だから両方を走らせ、レンズは
+`digest → preview → raw` の順に優先する。spill は observe モデルの最悪の性質も直す。
 細部を落とした要約に、原典へ戻る道ができるからだ。
 
-Digest は **digester のコンテキストウィンドウに合わせて分割** され、
-分割数の上限は locality によって変わる — ローカルの digester は 16 分割まで読む
-(限界費用は自前ハードの実時間だけ)が、クラウドの digester は分割仕事を
+Digest は **observe モデルのコンテキストウィンドウに合わせて分割** され、
+分割数の上限は locality によって変わる — ローカルの observe モデルは 16 分割まで読む
+(限界費用は自前ハードの実時間だけ)が、クラウドの observe モデルは分割仕事を
 **まるごと断る**。spill がすでに無料で被害を抑えているからだ。
 この定数こそ、ハイブリッド論の縮図といえる。
 
@@ -246,7 +296,7 @@ src/
   core/        types · transcript(追記専用ログ)· loop · guards · steering
   context/     lens + PrefixGuard · spill · repair
   models/      router · react-port · providers/{anthropic,openai,ollama,scripted}
-  steps/       digester · verifier · subagent · react · prompts · sections
+  steps/       observe · verify · subagent · react · prompts · sections
   tools/       registry · builtin · edit/glob/grep
   cache/       limits(ブレークポイント・ルックバック・下限)· keeper
   session/     store (SQLite+FTS5) · persist · search-tool
@@ -260,15 +310,15 @@ src/
 ## テストとベンチマーク
 
 ```bash
-npm test               # 160 テスト
+npm test               # 177 テスト
 npm run bench          # オフライン・決定的・無料 — 仕組みのコスト
 npm run bench:live     # 実モデル — 正しさの検証
 ```
 
 ベンチマークは、各仕組みが勝つべき場面と、コストにしかならない場面の両方を
-含むタスクで対照群と比較する。実測では digester は
+含むタスクで対照群と比較する。実測では observe モデルは
 **得意な場面で 88% 安く、役に立たない場面では 43% 高く**、4 タスク合計で **−58%**。
-導入直後に、digester が実行され課金されながら出力が黙って捨てられていた
+導入直後に、observe モデルが実行され課金されながら出力が黙って捨てられていた
 バグを捕まえ、その時点で元を取った。
 
 Node 22.5 以上が必要(組み込みの `node:sqlite` を使うため)。

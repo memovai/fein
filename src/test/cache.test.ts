@@ -198,7 +198,7 @@ test("surfacing a deferred tool appends rather than rewriting the prefix", async
     locality: "cloud",
     handler: () => ({ text: "done" }),
   });
-  const agent = new Agent({ router: new Router().bind("driver", cloud), tools: reg, maxSteps: 2 });
+  const agent = new Agent({ router: new Router().bind("think", cloud), tools: reg, maxSteps: 2 });
 
   await agent.run("first");
   const before = agent.view();
@@ -206,7 +206,7 @@ test("surfacing a deferred tool appends rather than rewriting the prefix", async
   agent.surfaceTool("later");
   const after = agent.view();
 
-  // Strict extension: everything the driver already saw is untouched.
+  // Strict extension: everything the think model already saw is untouched.
   assert.deepEqual(after.slice(0, before.length), before);
   const added = after[after.length - 1]!;
   assert.equal(added.role, "system");
@@ -219,7 +219,7 @@ test("surfacing a deferred tool appends rather than rewriting the prefix", async
 test("surfacing a non-deferred or unknown tool is refused", () => {
   const reg = new ToolRegistry().register(noopTool("always"));
   const cloud = new ScriptedPort({ id: "c", locality: "cloud", handler: () => ({ text: "" }) });
-  const agent = new Agent({ router: new Router().bind("driver", cloud), tools: reg });
+  const agent = new Agent({ router: new Router().bind("think", cloud), tools: reg });
 
   assert.throws(() => agent.surfaceTool("always"), /not deferred/);
   assert.throws(() => agent.surfaceTool("nope"), /unknown tool/);
@@ -265,7 +265,7 @@ test("tool changes render as tool_addition blocks on a system message", async ()
 test("injected context is a system-role message, not a rewritten system prompt", async () => {
   const reg = new ToolRegistry().register(noopTool("t"));
   const cloud = new ScriptedPort({ id: "c", locality: "cloud", handler: () => ({ text: "ok" }) });
-  const agent = new Agent({ router: new Router().bind("driver", cloud), tools: reg, maxSteps: 2 });
+  const agent = new Agent({ router: new Router().bind("think", cloud), tools: reg, maxSteps: 2 });
 
   await agent.run("hello");
   const before = agent.view();

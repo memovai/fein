@@ -10,9 +10,9 @@
  *
  *  - `find-symbol` and `list-importers` are **search-shaped**: the work is
  *    reading many files to extract a little. That is a subagent's case.
- *  - `failing-test` is **observation-shaped**: one command the driver must
+ *  - `failing-test` is **observation-shaped**: one command the think model must
  *    choose, whose output is 3000 tokens with one line that matters. That is
- *    the digester's case, and the one where a lossy digest would silently
+ *    the observe model's case, and the one where a lossy digest would silently
  *    produce a wrong answer.
  *  - `dep-version` is a **control**: small input, small output, no mechanism
  *    should help. If a configuration is slower or pricier here, that is its
@@ -41,7 +41,7 @@ export const TASKS: BenchTask[] = [
   },
   {
     id: "failing-test",
-    exercises: "observation — 3k-token log, one line matters (digester's case)",
+    exercises: "observation — 3k-token log, one line matters (observe model's case)",
     prompt:
       "Read test/run.log. Exactly one test fails. Report how many tests failed, the name of the " +
       "failing test, and the source location it points at.",

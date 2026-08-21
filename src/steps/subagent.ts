@@ -10,8 +10,8 @@ import type { StepName } from "../core/types.js";
  * Distinct from FE!N's *slot* delegation, and the distinction matters:
  *
  *  - **Slot delegation** hands one stage of one turn to a different model —
- *    the digester compressing an observation. Same conversation, same
- *    transcript, no new context, and the driver keeps every decision.
+ *    the observe model compressing an observation. Same conversation, same
+ *    transcript, no new context, and the think model keeps every decision.
  *  - **Subagent delegation** hands an entire sub-task to a fresh agent with
  *    its own context window, which reports back a summary. The parent gives up
  *    every intermediate decision in exchange for never seeing the intermediate
@@ -23,8 +23,8 @@ import type { StepName } from "../core/types.js";
  * "Choosing a delegation boundary".
  *
  * They compose: a subagent is itself a full FE!N agent, so it can run its own
- * hybrid loop — a cheap local driver for a mechanical sub-task, a frontier
- * driver for a hard one — and its cost lands in the same ledger.
+ * hybrid loop — a cheap local think model for a mechanical sub-task, a frontier
+ * think model for a hard one — and its cost lands in the same ledger.
  *
  * ## Why the depth cap is not optional
  *
@@ -73,7 +73,7 @@ export class SpawnBudget {
 }
 
 export interface SubagentOptions {
-  /** Max nesting depth. 1 = the driver may spawn, but its children may not. */
+  /** Max nesting depth. 1 = the think model may spawn, but its children may not. */
   maxDepth?: number;
   /** Max subagents a single agent may spawn over its whole run. */
   maxSpawns?: number;
@@ -86,11 +86,11 @@ export interface SubagentOptions {
    * this limits the tree.
    */
   maxTotalSpawns?: number;
-  /** Which slot the subagent's driver binds to. Defaults to the parent's. */
-  driverSlot?: StepName;
+  /** Which slot the subagent's think model binds to. Defaults to the parent's. */
+  thinkSlot?: StepName;
 }
 
-export const DEFAULT_SUBAGENT_OPTIONS: Required<Omit<SubagentOptions, "driverSlot">> = {
+export const DEFAULT_SUBAGENT_OPTIONS: Required<Omit<SubagentOptions, "thinkSlot">> = {
   maxDepth: 2,
   maxSpawns: 8,
   maxSteps: 12,
@@ -117,7 +117,9 @@ export interface SubagentDeps {
     depth: number;
     maxSteps: number;
     allowSideEffects: boolean;
-  }) => Promise<{ text: string; steps: number }>;
+    /** Resolved from the LLM's per-spawn `tier` choice; absent = inherit. */
+    tier?: "light" | "heavy";
+  }) => Promise<{ text: string; steps: number; stoppedBecause: string }>;
 }
 
 /**
@@ -151,12 +153,33 @@ export function subagentTool(deps: SubagentDeps): Tool | undefined {
             description:
               "The complete, self-contained instruction, including what to report back.",
           },
+          acceptance: {
+            type: "string",
+            description:
+              "What must be true for this step to count as done. The subagent reports " +
+              "against these criteria, and you judge its report by them. Write them when " +
+              "the task is one step of a larger plan.",
+          },
           read_only: {
             type: "string",
             description:
               "\"true\" to forbid the subagent any side effects. Default \"true\". " +
               "Use \"false\" only when the sub-task must modify the workspace.",
           },
+          ...(deps.router.has("execute")
+            ? {
+                tier: {
+                  type: "string",
+                  enum: ["light", "heavy"],
+                  description:
+                    "Which model serves the subagent. \"light\" = the cheap execute binding: " +
+                    "mechanical steps with a clear spec — search, extraction, bulk edits. " +
+                    "\"heavy\" = your own model: steps needing judgment, design, or debugging. " +
+                    "Omit to inherit the configured default. A light subagent that starts " +
+                    "going in circles stops early and reports what blocked it.",
+                },
+              }
+            : {}),
         },
         required: ["task"],
       },
@@ -182,6 +205,17 @@ export function subagentTool(deps: SubagentDeps): Tool | undefined {
       const task = String(args["task"] ?? "").trim();
       if (!task) return "Refused: empty task. A subagent cannot infer what you want.";
 
+      // When execute is unbound the schema has no `tier` property, and
+      // argument validation refuses the call before it gets here — the
+      // capability is absent, not merely discouraged.
+      const rawTier = String(args["tier"] ?? "").toLowerCase();
+      const tier = rawTier === "light" || rawTier === "heavy" ? rawTier : undefined;
+
+      const acceptance = String(args["acceptance"] ?? "").trim();
+      const fullTask = acceptance
+        ? `${task}\n\nAcceptance criteria:\n${acceptance}\n\nReport explicitly whether each criterion is met, and if not, why.`
+        : task;
+
       // Read-only by default. A subagent's instructions come from another
       // model's output, so the blast radius stays bounded unless the caller
       // explicitly widens it — and it can never widen past its own parent.
@@ -196,7 +230,7 @@ export function subagentTool(deps: SubagentDeps): Tool | undefined {
       }
 
       const result = await deps.spawn({
-        task,
+        task: fullTask,
         router: deps.router,
         tools: childTools,
         ledger: deps.ledger,
@@ -204,11 +238,22 @@ export function subagentTool(deps: SubagentDeps): Tool | undefined {
         depth: deps.depth + 1,
         maxSteps: opts.maxSteps,
         allowSideEffects,
+        ...(tier ? { tier } : {}),
       });
 
+      // A stuck bail-out is the planner's signal, so it leads the report: the
+      // right responses are a heavier tier, a different decomposition, or
+      // doing the step directly — not respawning the same thing.
+      const bailed =
+        result.stoppedBecause === "stuck"
+          ? "NOTE: the subagent stopped early because it was going in circles. Consider the " +
+            "heavy tier, a different decomposition, or doing this step yourself.\n\n"
+          : "";
       return (
+        bailed +
         `Subagent (depth ${deps.depth + 1}, ${result.steps} steps, ` +
-        `${allowSideEffects ? "read-write" : "read-only"}) reported:\n\n${result.text}`
+        `${tier ? `${tier} tier, ` : ""}${allowSideEffects ? "read-write" : "read-only"}) ` +
+        `reported:\n\n${result.text}`
       );
     },
   };

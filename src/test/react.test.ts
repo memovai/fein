@@ -272,7 +272,7 @@ test("a ReAct model drives the real loop, with tools and observations", async ()
   );
 
   const agent = new Agent({
-    router: new Router().bind("driver", local),
+    router: new Router().bind("think", local),
     tools: reg,
     subagents: false,
     maxSteps: 5,

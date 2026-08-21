@@ -94,7 +94,7 @@ export class CacheKeeper {
     try {
       // maxTokens 0: run prefill, refresh the cache, bill no output tokens.
       const result = await this.opts.port.complete({ ...req, maxTokens: 0, temperature: 0 });
-      this.opts.ledger?.record("driver", this.opts.port.info, result);
+      this.opts.ledger?.record("think", this.opts.port.info, result);
       this.opts.onRefresh?.(this.refreshes, result.usage.cacheReadTokens);
     } catch {
       // A failed heartbeat is not worth surfacing or retrying; the next real

@@ -9,7 +9,7 @@ import type { Tool } from "../tools/registry.js";
  *
  * No keys, no GPU, no network. Every model is scripted, so what you are
  * watching is the *harness*, which is the part that is actually novel. The
- * scripted cloud driver reports realistic token counts and the scripted local
+ * scripted cloud think model reports realistic token counts and the scripted local
  * models behave the way small models actually behave — including getting an
  * argument wrong once, so you can see the retry-and-validate path work.
  */
@@ -52,7 +52,7 @@ const testTool: Tool = {
 fakeTools.register(listTool).register(testTool);
 
 export function buildDemoAgent(onEvent: (e: FeinTrace) => void): Agent {
-  // --- The cloud driver: expensive, decides what happens. -------------------
+  // --- The cloud think: expensive, decides what happens. -------------------
   const cloud = new ScriptedPort({
     id: "cloud/sonnet-sim",
     locality: "cloud",
@@ -83,15 +83,15 @@ export function buildDemoAgent(onEvent: (e: FeinTrace) => void): Agent {
     },
   });
 
-  // --- The local digester: compresses the 330-line test log. ---------------
+  // --- The local observe: compresses the 330-line test log. ---------------
   //
-  // This is the whole hybrid story in one step. The driver decided to run
+  // This is the whole hybrid story in one step. The think model decided to run
   // `npm test` itself — its authority is untouched — but the 3100-token log
-  // is compressed on this machine before the driver ever sees it. Two things
+  // is compressed on this machine before the think model ever sees it. Two things
   // follow that a cheap *cloud* subagent could not give you: the saving
   // compounds over every remaining turn, and the raw log never leaves the
   // laptop.
-  const localDigester = new ScriptedPort({
+  const localObserver = new ScriptedPort({
     id: "local/qwen3b-sim",
     locality: "local",
     contextWindow: 32_768,
@@ -107,8 +107,8 @@ export function buildDemoAgent(onEvent: (e: FeinTrace) => void): Agent {
   });
 
   const router = new Router()
-    .bind("driver", cloud)
-    .bind("digester", localDigester, { fallbacks: [cloud] });
+    .bind("think", cloud)
+    .bind("observe", localObserver, { fallbacks: [cloud] });
 
   return new Agent({
     router,

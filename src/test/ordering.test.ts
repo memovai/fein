@@ -52,7 +52,7 @@ test("parallel tool results are appended in call order, not completion order", a
   });
 
   const agent = new Agent({
-    router: new Router().bind("driver", cloud),
+    router: new Router().bind("think", cloud),
     tools: reg,
     maxSteps: 3,
   });
@@ -86,7 +86,7 @@ test("the same batch produces an identical transcript across runs", async () => 
             }
           : { text: "done" },
     });
-    return new Agent({ router: new Router().bind("driver", cloud), tools: reg, maxSteps: 3 });
+    return new Agent({ router: new Router().bind("think", cloud), tools: reg, maxSteps: 3 });
   };
 
   const a1 = build();
@@ -134,7 +134,7 @@ test("side-effecting calls are serialized against reads", async () => {
         : { text: "done" },
   });
 
-  await new Agent({ router: new Router().bind("driver", cloud), tools: reg, maxSteps: 3 }).run("go");
+  await new Agent({ router: new Router().bind("think", cloud), tools: reg, maxSteps: 3 }).run("go");
 
   // The mutation must not begin until the preceding read has finished.
   assert.ok(

@@ -34,6 +34,7 @@ export {
 
 // ── models: the plugin surface, routing, and transports ─────────────────────
 export { Router, SlotUnboundError, type RouteOutcome } from "./models/router.js";
+export { escalateOnStuck, escalateOnReject, rightSize } from "./models/policy.js";
 export { AnthropicPort, type AnthropicOptions } from "./models/providers/anthropic.js";
 export {
   OpenAICompatPort,
@@ -57,8 +58,8 @@ export {
 } from "./models/providers/scripted.js";
 
 // ── steps: the swappable stages of the loop ─────────────────────────────────
-export { digest, DEFAULT_DIGEST_POLICY, type DigestPolicy } from "./steps/digester.js";
-export { verify, type Verdict } from "./steps/verifier.js";
+export { digest, DEFAULT_DIGEST_POLICY, type DigestPolicy } from "./steps/observe.js";
+export { verify, type Verdict } from "./steps/verify.js";
 export * from "./steps/prompts.js";
 export {
   SystemPromptBuilder,
@@ -155,6 +156,8 @@ export {
   localOnlyProfile,
   type FeinConfig,
   type PortConfig,
+  type BindTarget,
+  type PolicyConfig,
 } from "./config/profiles.js";
 export {
   openWorkspace,

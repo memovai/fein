@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { LoopGuard, stableJson } from "../core/guards.js";
 import { Agent, type FeinTrace } from "../core/loop.js";
 import { Router } from "../models/router.js";
+import { escalateOnStuck } from "../models/policy.js";
 import { ScriptedPort } from "../models/providers/scripted.js";
 import { ToolRegistry, type Tool } from "../tools/registry.js";
 import type { ToolCall, ToolResult } from "../core/types.js";
@@ -115,7 +116,7 @@ function stuckAgent(maxSteps: number, trace: FeinTrace[]): Agent {
   });
 
   return new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: reg,
     subagents: false,
     maxSteps,
@@ -130,6 +131,62 @@ test("a stuck loop gets nudged rather than silently spinning", async () => {
   const guards = trace.filter((e) => e.type === "guard");
   assert.ok(guards.length >= 1, "the harness must notice; the model cannot see its own loop");
   assert.equal((guards[0] as { kind: string }).kind, "repeat");
+});
+
+test("with a policy bound, a stuck loop escalates thinking on the same port", async () => {
+  const trace: FeinTrace[] = [];
+  const reg = new ToolRegistry().register({
+    spec: { name: "look", description: "look", parameters: { type: "object", properties: {} } },
+    async run() {
+      return "always the same answer";
+    },
+  } as Tool);
+
+  const seen: Array<string | undefined> = [];
+  const port = new ScriptedPort({
+    id: "cloud",
+    locality: "cloud",
+    handler: (req) => {
+      seen.push(req.thinking);
+      const convo = JSON.stringify(req.messages);
+      if (convo.includes("cannot take further actions")) {
+        return { text: "nothing new to learn here" };
+      }
+      return { text: "", toolCalls: [{ id: "t", name: "look", args: {} }] };
+    },
+  });
+
+  const agent = new Agent({
+    router: new Router().bind("think", port, { policy: escalateOnStuck() }),
+    tools: reg,
+    subagents: false,
+    maxSteps: 6,
+    onEvent: (e) => trace.push(e),
+  });
+  await agent.run("check the thing");
+
+  // Order matters: the guard is the cause, the route is the effect.
+  const guardIdx = trace.findIndex((e) => e.type === "guard");
+  const routeIdx = trace.findIndex((e) => e.type === "route");
+  assert.ok(guardIdx >= 0, "the guard must fire first");
+  assert.ok(routeIdx > guardIdx, "escalation follows the guard");
+
+  // Effort rises after the guard and stays raised — sticky for the run.
+  assert.equal(seen[0], undefined, "the run starts at default effort");
+  const firstRaised = seen.findIndex((t) => t !== undefined);
+  assert.ok(firstRaised > 0, "the guard fire raises the thinking level");
+  assert.equal(seen[firstRaised], "medium");
+  assert.ok(
+    seen.slice(firstRaised).every((t) => t !== undefined),
+    "escalation does not flap back down mid-run",
+  );
+
+  // The whole point: never a port swap, and therefore never a prefix break.
+  const routes = trace.filter((e) => e.type === "route") as Array<{ model: string }>;
+  assert.ok(routes.length >= 1);
+  assert.ok(routes.every((r) => r.model === "cloud"), "same port throughout");
+  assert.equal(agent.ledger.summary().cache.breaks.length, 0, "the cached prefix survives");
+  assert.ok(agent.ledger.summary().escalations >= 1, "and the ledger can prove it happened");
 });
 
 test("running out of turns forces a real answer, not a leftover fragment", async () => {
@@ -167,7 +224,7 @@ test("the wrap-up call withholds tools so it cannot start another cycle", async 
   });
 
   await new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: reg,
     subagents: false,
     maxSteps: 2,
@@ -195,7 +252,7 @@ test("turn lifecycle events bracket each cycle", async () => {
   });
 
   await new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: reg,
     subagents: false,
     maxSteps: 4,
@@ -236,7 +293,7 @@ test("a healthy loop is never nudged", async () => {
   });
 
   await new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: reg,
     subagents: false,
     maxSteps: 6,

@@ -10,7 +10,7 @@
 压缩 3000 行测试日志、拦住一条危险命令 —— 被当成一件事、按一件事计价、发给同一个模型。
 
 FE!N 把循环拆成 **slot**,让你给每个 slot 绑不同的模型:前沿模型负责思考,
-你笔记本上的 3B 模型负责阅读。TypeScript,**零运行时依赖**,160 个测试。
+你笔记本上的 3B 模型负责阅读。TypeScript,**零运行时依赖**,177 个测试。
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -21,9 +21,9 @@ const cloud = new AnthropicPort({ id: "cloud", model: "claude-sonnet-5",
 const local = new OllamaPort({ id: "local", model: "qwen2.5:3b" });
 
 const router = new Router()
-  .bind("driver",   cloud)                          // 决定发生什么
-  .bind("digester", local, { fallbacks: [cloud] })  // 压缩观测结果
-  .bind("verifier", cloud);                         // 拦截子 agent 的写操作
+  .bind("think",   cloud)                           // 决定发生什么
+  .bind("observe", local, { fallbacks: [cloud] })   // 压缩观测结果
+  .bind("verify",  cloud);                          // 拦截子 agent 的写操作
 
 await new Agent({ router, tools: defaultTools() }).run("测试为什么挂了?");
 ```
@@ -42,12 +42,12 @@ npm install && npm run demo
 
 ```
 bindings
-  driver      cloud/sonnet-sim [cloud]
-  digester    local/qwen3b-sim [local] -> cloud/sonnet-sim
+  think       cloud/sonnet-sim [cloud]
+  observe     local/qwen3b-sim [local] -> cloud/sonnet-sim
 
-[2] driver · cloud/sonnet-sim cloud
+[2] think · cloud/sonnet-sim cloud
 是个 TypeScript 项目。跑测试套件来定位失败。
-  tool shell(command: "npm test") via driver
+  tool shell(command: "npm test") via think
        ok $ npm test ok 1 - unit/parser handles case 1 …
   digest shell: 3100 → 43 tok (99% smaller · local/qwen3b-sim)
   cache: prefix stable — 3 msg reused, 2 new
@@ -59,7 +59,7 @@ calls 4  ·  $0.0024  ·  0.2s
   cache  hit 10.1%   saved $0.0011
 ```
 
-决定跑 `npm test` 的是 driver **自己** —— 它的权威没有被动过 —— 但它从没见过那 330 行日志。
+决定跑 `npm test` 的是 think 模型**自己** —— 它的权威没有被动过 —— 但它从没见过那 330 行日志。
 一个本地模型先把它压成了 43 个 token。这份节省在剩下的每一轮里持续生效,
 夺回了上下文窗口,而且原始日志从未离开这台机器。
 
@@ -67,16 +67,60 @@ calls 4  ·  $0.0024  ·  0.2s
 
 | Slot | 职责 | 为什么可以拆出来 |
 |---|---|---|
-| `driver` | 决定下一步做什么 | 最难的推理。留给前沿模型 |
-| `digester` | 在 driver 看到之前压缩大块输出 | 输出小于输入;节省会累积;原始数据不出本机 |
-| `verifier` | 拦截子 agent 改变世界的调用 | 触发得少,所以可以贵 |
-| `titler` | 给会话起名字 | 无关紧要 |
+| `think` | 决定下一步做什么 | 最难的推理。留给前沿模型 |
+| `observe` | 在 think 模型看到之前压缩大块输出 | 输出小于输入;节省会累积;原始数据不出本机 |
+| `verify` | 拦截子 agent 改变世界的调用 | 触发得少,所以可以贵 |
+| `title` | 给会话起名字 | 无关紧要 |
+| `execute` | 端到端地推进一个被委派的子任务 | plan-execute 委派的轻量层。默认不绑定 —— 未绑定的 slot 不对外声明任何东西 |
+
+这些名字取自 ReAct。Thought → `think`,它同时发出 Action —— 原生工具调用把思考与
+行动合并成同一次补全;而之所以没有 `action` slot,是因为工具由代码执行,不由模型执行。
+Observation → `observe`。`verify` 和 `title` 则是 ReAct 没有的控制面角色。
 
 任何 slot 都能放任何模型。每个 slot 都能配回退链,所以本地 runtime 挂掉只会让那个 slot
 降级到云端,而不是让整个会话停摆。
 
-**曾经有第五个 slot,我们把它删了。** `toolformer` 负责把 driver 一句话的意图变成
-具体的工具参数。实测下来,它**每次调用多花 11 到 15 个 driver 输出 token,节省为零** ——
+**绑定默认是静态的;自适应路由按 slot 逐个开启。** 绑定可以携带一条策略,
+策略只依据循环上报的事实做切换,绝不依据墙钟时间或运气 —— 因此同一份 transcript
+会重新推导出同样的决定,而且每个决定都会落进 trace 和账本:
+
+- `escalate-on-stuck`(用于 `think`):循环守卫发现模型在绕圈 → 还是同一个 port,
+  但思考强度调高。绝不在会话中途换 port:prompt 缓存按模型分键,
+  而一个模型的签名推理块回放给另一个模型是供应商级错误。
+  升级的旋钮是思考强度,不是换模型。
+- `escalate-on-reject`(用于 `observe`):没过质量门的本地 digest,
+  可以在云端 port 上重试一次。observe 这个 slot 的调用每次都带着全新的小上下文,
+  所以这种切换完全没有缓存包袱。
+- `right-size`(仅限旁路 slot):特别小的请求交给小模型,
+  即使这个 slot 的默认绑定是大模型。
+
+唯一能安全地重新指向 `think` 本身的地方,是**子 agent 边界** ——
+全新的上下文,没有东西可弄坏。有两种用法:
+
+- **静态**:设置 `subagents.thinkSlot`,之后每个子 agent 都跑在那个绑定上。
+- **Plan-execute**(绑定 `execute` slot 即启用):spawn 工具会多出一个 `tier` 参数,
+  由 think 模型逐步填写 —— `"light"` 让整个子任务跑在 execute 绑定上,
+  `"heavy"` 跑在 think 模型自己的绑定上。`acceptance` 参数要求规划者说清
+  「完成」意味着什么,子 agent 按它来汇报。优先级上,逐次 spawn 的选择
+  胜过 `thinkSlot` 配置,后者又胜过继承。
+
+所有试过这条路的人留下的两个教训,都由代码强制执行,而不是写在文档里。
+开始绕圈的便宜模型很少能自己恢复,所以 light 层的子 agent 会**在守卫第一次触发时
+就停下,并汇报是什么卡住了它** —— 升级、重新拆分、或亲自做这一步的是规划者;
+harness 绝不自作主张改路由。而委派的质量来自任务分解,不来自模型的裸判断,
+所以 tier 的使用指引放在工具 schema 和一个只在 `execute` 被绑定时才存在的
+冻结提示词分段里 —— 否则整个特性花费为零 token。
+
+```jsonc
+// config: the object form of a binding carries the policy
+"bind": {
+  "think":   { "port": "cloud", "policy": { "kind": "escalate-on-stuck" } },
+  "observe": { "port": "local", "policy": { "kind": "escalate-on-reject", "to": "cloud" } }
+}
+```
+
+**曾经还有一个 slot,我们把它删了。** `toolformer` 负责把 think 模型一句话的意图变成
+具体的工具参数。实测下来,它**每次调用多花 11 到 15 个 think 模型输出 token,节省为零** ——
 意图必须原样携带参数,所以它在结构上永远是被替换物的超集。带数字的完整记录在
 [DESIGN.md](./DESIGN.md)。教训是:**只有当被委派方能产出多于它所收到的东西,
 或者知道委派方不知道的事,委派才成立。**
@@ -125,13 +169,13 @@ calls 4  ·  $0.0024  ·  0.2s
 **Digest**(一次推理):本地模型对全文做语义压缩。
 
 两者互补,测试夹具能证明:332 行日志、唯一的失败在第 241 行 ——
-预览**看不到它**,digester 找得到。所以两个都跑,而 lens 按
-`digest → preview → raw` 的顺序取用。spill 还修好了 digester 最糟的性质:
+预览**看不到它**,observe 模型找得到。所以两个都跑,而 lens 按
+`digest → preview → raw` 的顺序取用。spill 还修好了 observe 模型最糟的性质:
 丢了细节的摘要,现在有一条回到原文的路。
 
-Digest 会**按 digester 的上下文窗口分块**,而分块上限取决于 locality ——
-本地 digester 读 16 块(边际成本只是自家硬件上的墙钟时间),
-云端 digester 则**直接拒绝**分块工作,因为 spill 已经免费把损失兜住了。
+Digest 会**按 observe 模型的上下文窗口分块**,而分块上限取决于 locality ——
+本地的 observe 模型读 16 块(边际成本只是自家硬件上的墙钟时间),
+云端的 observe 模型则**直接拒绝**分块工作,因为 spill 已经免费把损失兜住了。
 这个常量就是混合论点的微缩版。
 
 ## ReAct
@@ -220,7 +264,7 @@ src/
   core/        types · transcript(只追加日志)· loop · guards · steering
   context/     lens + PrefixGuard · spill · repair
   models/      router · react-port · providers/{anthropic,openai,ollama,scripted}
-  steps/       digester · verifier · subagent · react · prompts · sections
+  steps/       observe · verify · subagent · react · prompts · sections
   tools/       registry · builtin · edit/glob/grep
   cache/       limits(断点、回溯窗口、最小前缀)· keeper
   session/     store (SQLite+FTS5) · persist · search-tool
@@ -234,15 +278,15 @@ src/
 ## 测试与基准
 
 ```bash
-npm test               # 160 个测试
+npm test               # 177 个测试
 npm run bench          # 离线、确定性、免费 —— 机制本身的成本
 npm run bench:live     # 真实模型 —— 回答正确性问题
 ```
 
 基准会把每个机制和对照组比较,任务是特意挑的:每个机制都有一个它该赢的场景,
-和一个它只会增加成本的场景。实测:digester 在它擅长的场景**便宜 88%**,
+和一个它只会增加成本的场景。实测:observe 模型在它擅长的场景**便宜 88%**,
 在帮不上忙的场景**贵 43%**,四个任务合计 **−58%**。
-它上线后立刻回本 —— 抓到了一个 digester 被执行、被计费、
+它上线后立刻回本 —— 抓到了一个 observe 模型被执行、被计费、
 输出却被悄悄丢弃的 bug。
 
 需要 Node ≥ 22.5(内置 `node:sqlite`)。

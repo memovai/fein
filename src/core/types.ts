@@ -19,7 +19,7 @@ export interface ToolCall {
 
 export interface ToolResult {
   callId: string;
-  /** Raw output of the tool. May be large; the digester may summarize it. */
+  /** Raw output of the tool. May be large; the observe model may summarize it. */
   content: string;
   isError: boolean;
 }
@@ -192,7 +192,7 @@ export interface ModelPort {
 // ---------------------------------------------------------------------------
 
 /**
- * Channels partition the transcript. "main" is the conversation the driver
+ * Channels partition the transcript. "main" is the conversation the think model
  * (usually the cloud model) sees. Side channels hold delegated local-model
  * work (tool-forming, digesting, verification) whose full contents must NEVER
  * enter the main channel retroactively — only appended summaries may — because
@@ -211,7 +211,7 @@ export type FeinEvent =
       toolCalls: ToolCall[];
       /** Thought, preserved so it can be replayed to the same model. */
       reasoning?: Reasoning[];
-      /** Which binding produced this (e.g. "driver@cloud"). */
+      /** Which binding produced this (e.g. "think@cloud"). */
       by: string;
     }
   | { kind: "tool_result"; id: string; ts: number; channel: ChannelId; result: ToolResult }
@@ -295,7 +295,13 @@ export type FeinEvent =
       tool: string;
     };
 
-export type StepName = "driver" | "digester" | "verifier" | "titler";
+/**
+ * The slots. Four serve stages of one turn; `execute` serves a delegated
+ * sub-task's whole loop — the light tier of plan-execute delegation. It is
+ * unbound by default: an unbound slot costs nothing and advertises nothing
+ * (the spawn tool only offers a `tier` choice when `execute` is bound).
+ */
+export type StepName = "think" | "observe" | "verify" | "title" | "execute";
 
 /** A model binding: a port plus slot-specific parameters. */
 export interface Binding {
@@ -305,4 +311,51 @@ export interface Binding {
   temperature?: number;
   /** Fallback ports tried in order if this port throws. */
   fallbacks?: ModelPort[];
+  /** Optional adaptive routing. Absent = the static binding, exactly as before. */
+  policy?: RoutePolicy;
+}
+
+/**
+ * Why a caller is asking for something other than the default route.
+ * "stuck" — the loop guard saw the think model repeating itself.
+ * "reject" — a produced artifact failed a quality gate (e.g. a bloated digest).
+ */
+export type RoutePressure = "stuck" | "reject";
+
+/**
+ * Facts a caller hands the policy. Hints are observations, never decisions:
+ * the loop reports what happened; the policy decides what to do about it.
+ * Every field must be derivable from the recorded transcript, which is what
+ * keeps adaptive routing replayable (see RoutePolicy).
+ */
+export interface RouteHints {
+  pressure?: RoutePressure;
+  /** How many times the pressure has been observed (guard fires, rejects). */
+  pressureCount?: number;
+  /** Estimated input size, for right-sizing trivially small requests. */
+  approxInputTokens?: number;
+}
+
+/** What a policy decided, recorded verbatim in the trace and ledger. */
+export interface RouteDecision {
+  /** Must be the binding's primary or one of its declared fallbacks. */
+  port: ModelPort;
+  /** Per-call thinking override; used only when the request left it unset. */
+  thinking?: ThinkingLevel;
+  /** Human-readable rationale; empty string means the default route. */
+  reason: string;
+}
+
+/**
+ * Adaptive routing, opt-in per binding.
+ *
+ * `decide` MUST be a pure function of its arguments. Every input is derivable
+ * from the recorded transcript (guard notes, message sizes), so replaying the
+ * same transcript re-derives the same decisions — which is how adaptive
+ * routing coexists with the "concurrency must not be observable in the
+ * record" rule. Latency- or error-rate-based policies are deliberately not
+ * expressible here.
+ */
+export interface RoutePolicy {
+  decide(binding: Binding, req: CompletionRequest, hints: RouteHints): RouteDecision;
 }

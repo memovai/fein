@@ -15,7 +15,7 @@ test("events survive the process: append then reload", () => {
   const store = mem();
   const s = PersistentSession.create(store, { title: "first" });
   s.transcript.user("remember the deploy key is in vault X");
-  s.transcript.assistant("Noted.", [], "driver@test");
+  s.transcript.assistant("Noted.", [], "think@test");
 
   const reloaded = store.loadEvents(s.id);
   assert.equal(reloaded.length, 2);
@@ -27,7 +27,7 @@ test("resume replays without re-persisting", () => {
   const store = mem();
   const a = PersistentSession.create(store, { title: "t" });
   a.transcript.user("one");
-  a.transcript.assistant("two", [], "driver@test");
+  a.transcript.assistant("two", [], "think@test");
   assert.equal(store.eventCount(a.id), 2);
 
   const b = PersistentSession.resume(store, a.id);
@@ -72,7 +72,7 @@ test("search excludes the current session so recall is about the past", () => {
 test("bulky tool output is not indexed — recall returns decisions, not logs", () => {
   const store = mem();
   const s = PersistentSession.create(store);
-  s.transcript.assistant("", [{ id: "a", name: "shell", args: {} }], "driver@test");
+  s.transcript.assistant("", [{ id: "a", name: "shell", args: {} }], "think@test");
   s.transcript.toolResult({ callId: "a", content: "ERROR ERROR ERROR ".repeat(200), isError: false });
   s.transcript.user("the build is failing on ERROR handling");
 
@@ -158,7 +158,7 @@ test("an agent with a session persists its whole run", async () => {
     handler: () => ({ text: "all done" }),
   });
   const agent = new Agent({
-    router: new Router().bind("driver", cloud),
+    router: new Router().bind("think", cloud),
     tools: new ToolRegistry(),
     session,
     subagents: false,

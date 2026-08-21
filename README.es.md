@@ -13,7 +13,7 @@ cobran como un solo trabajo y se le mandan a un solo modelo.
 
 FE!N parte el bucle en **slots** y te deja asignar un modelo distinto a cada uno:
 que el modelo de frontera piense y que un modelo de 3B en tu portátil lea.
-TypeScript, **cero dependencias en tiempo de ejecución**, 160 pruebas.
+TypeScript, **cero dependencias en tiempo de ejecución**, 177 pruebas.
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -24,9 +24,9 @@ const cloud = new AnthropicPort({ id: "cloud", model: "claude-sonnet-5",
 const local = new OllamaPort({ id: "local", model: "qwen2.5:3b" });
 
 const router = new Router()
-  .bind("driver",   cloud)                          // decide qué pasa
-  .bind("digester", local, { fallbacks: [cloud] })  // comprime las observaciones
-  .bind("verifier", cloud);                         // vigila los cambios de un subagente
+  .bind("think",   cloud)                           // decide qué pasa
+  .bind("observe", local, { fallbacks: [cloud] })   // comprime las observaciones
+  .bind("verify",  cloud);                          // vigila los cambios de un subagente
 
 await new Agent({ router, tools: defaultTools() }).run("¿Por qué fallan las pruebas?");
 ```
@@ -46,12 +46,12 @@ npm install && npm run demo
 
 ```
 bindings
-  driver      cloud/sonnet-sim [cloud]
-  digester    local/qwen3b-sim [local] -> cloud/sonnet-sim
+  think       cloud/sonnet-sim [cloud]
+  observe     local/qwen3b-sim [local] -> cloud/sonnet-sim
 
-[2] driver · cloud/sonnet-sim cloud
+[2] think · cloud/sonnet-sim cloud
 Es un proyecto TypeScript. Ejecuto las pruebas para encontrar el fallo.
-  tool shell(command: "npm test") via driver
+  tool shell(command: "npm test") via think
        ok $ npm test ok 1 - unit/parser handles case 1 …
   digest shell: 3100 → 43 tok (99% smaller · local/qwen3b-sim)
   cache: prefix stable — 3 msg reused, 2 new
@@ -63,7 +63,7 @@ calls 4  ·  $0.0024  ·  0.2s
   cache  hit 10.1%   saved $0.0011
 ```
 
-El driver decidió ejecutar `npm test` **él mismo** —su autoridad queda intacta—
+El modelo think decidió ejecutar `npm test` **él mismo** —su autoridad queda intacta—
 pero nunca vio el log de 330 líneas. Un modelo local lo comprimió antes a 43
 tokens. Ese ahorro se acumula en cada turno restante, recupera ventana de
 contexto, y el log original nunca salió de la máquina.
@@ -72,16 +72,73 @@ contexto, y el log original nunca salió de la máquina.
 
 | Slot | Trabajo | Por qué se puede separar |
 |---|---|---|
-| `driver` | Decidir qué pasa a continuación | El razonamiento difícil. Déjalo en la frontera. |
-| `digester` | Comprimir salidas voluminosas antes de que el driver las vea | La salida es menor que la entrada, el ahorro se acumula y los datos crudos no salen de la máquina |
-| `verifier` | Vigilar las llamadas de un subagente que modifican el mundo | Se activa poco, así que puede permitirse ser caro |
-| `titler` | Ponerle nombre a la sesión | Trivial |
+| `think` | Decidir qué pasa a continuación | El razonamiento difícil. Déjalo en la frontera. |
+| `observe` | Comprimir salidas voluminosas antes de que el modelo think las vea | La salida es menor que la entrada, el ahorro se acumula y los datos crudos no salen de la máquina |
+| `verify` | Vigilar las llamadas de un subagente que modifican el mundo | Se activa poco, así que puede permitirse ser caro |
+| `title` | Ponerle nombre a la sesión | Trivial |
+| `execute` | Llevar una subtarea delegada de principio a fin | El nivel ligero de la delegación plan-execute. Sin asignar por defecto: un slot sin asignar no anuncia nada |
+
+Los nombres son los de ReAct. Thought → `think`, que también emite la Action: las
+llamadas nativas a herramientas funden pensamiento y acción en una sola
+generación, y no hay slot `action` porque las herramientas las ejecuta el código,
+no un modelo. Observation → `observe`. `verify` y `title` son papeles del plano de
+control que ReAct no tiene.
 
 Cualquier slot admite cualquier modelo. Todos aceptan una cadena de respaldo, así
 que un runtime local caído degrada ese slot a la nube en vez de tumbar la sesión.
 
-**Hubo un quinto slot y lo borramos.** Un `toolformer` convertía la intención de
-una línea del driver en argumentos concretos. Medido, costaba **entre 11 y 15
+**Las asignaciones son estáticas por defecto; el enrutamiento adaptativo se
+activa slot a slot.** Una asignación puede llevar una política que conmuta según
+hechos que reporta el bucle, nunca según el reloj de pared ni la suerte: así, la
+misma transcripción rederiva las mismas decisiones, y cada decisión queda en la
+traza y en el libro de cuentas.
+
+- `escalate-on-stuck` (para `think`): el guardián del bucle nota que el modelo
+  da vueltas → el mismo port, mayor esfuerzo de razonamiento. Nunca un cambio de
+  port a mitad de sesión: las cachés de prompt llevan clave por modelo, y los
+  bloques de razonamiento firmados de un modelo son un error del proveedor si se
+  reproducen ante otro. El mando de escalada es el esfuerzo; el cambio de
+  modelo, no.
+- `escalate-on-reject` (para `observe`): un digest local que no pasa la puerta
+  de calidad obtiene un reintento en el port de nube. Las llamadas del slot
+  observe llevan cada vez un contexto pequeño y nuevo, así que este cambio no se
+  juega nada en la caché.
+- `right-size` (solo slots laterales): las peticiones trivialmente pequeñas van
+  al modelo pequeño aunque el valor por defecto del slot sea el grande.
+
+El único lugar seguro para reapuntar el propio `think` es una **frontera de
+subagente**: contexto nuevo, nada que romper. Hay dos maneras de usarla:
+
+- **Estática**: configura `subagents.thinkSlot` y todos los hijos corren sobre
+  esa asignación.
+- **Plan-execute** (se habilita al asignar el slot `execute`): la herramienta de
+  spawn gana un parámetro `tier` que el modelo think rellena paso a paso —
+  `"light"` ejecuta toda la subtarea sobre la asignación de execute, `"heavy"`
+  sobre la del propio modelo think. Un parámetro `acceptance` obliga al
+  planificador a decir qué significa «hecho», y el hijo reporta contra eso. La
+  elección por spawn gana a la config de `thinkSlot`, que a su vez gana a la
+  herencia.
+
+Dos lecciones de todos los que lo intentaron están impuestas en código, no en
+prosa. Un modelo barato que empieza a dar vueltas rara vez se recupera, así que
+un hijo de nivel light **se detiene al primer disparo del guardián y reporta qué
+lo bloqueó**: el planificador escala, re-divide o hace el paso él mismo; el
+harness nunca re-enruta por su cuenta. Y la calidad de la delegación viene de la
+descomposición, no del juicio bruto del modelo, así que la guía del tier vive en
+el esquema de la herramienta y en una sección congelada del prompt que solo
+existe cuando `execute` está asignado; si no, toda la función cuesta cero
+tokens.
+
+```jsonc
+// config: the object form of a binding carries the policy
+"bind": {
+  "think":   { "port": "cloud", "policy": { "kind": "escalate-on-stuck" } },
+  "observe": { "port": "local", "policy": { "kind": "escalate-on-reject", "to": "cloud" } }
+}
+```
+
+**Hubo otro slot y lo borramos.** Un `toolformer` convertía la intención de
+una línea del modelo think en argumentos concretos. Medido, costaba **entre 11 y 15
 tokens de salida extra en cada llamada y ahorraba cero**: la intención tiene que
 llevar los argumentos literalmente, así que es estructuralmente un superconjunto
 de lo que reemplaza. El análisis con números está en [DESIGN.md](./DESIGN.md).
@@ -144,13 +201,13 @@ sustituye por una vista de principio y final más una ruta que el modelo puede
 criterio semántico.
 
 Son complementarios, y el fixture lo demuestra: en un log de 332 líneas con el
-único fallo en la línea 241, la vista previa **no lo ve** y el digester sí. Por
+único fallo en la línea 241, la vista previa **no lo ve** y el modelo observe sí. Por
 eso corren los dos, y la lente prefiere `digest → preview → raw`. Spill además
-arregla el peor defecto del digester: un resumen que perdió un detalle ahora
+arregla el peor defecto del modelo observe: un resumen que perdió un detalle ahora
 tiene un camino de vuelta al original.
 
-La digestión se **trocea según la ventana de contexto del digester**, y el tope
-de trozos depende de la localidad: un digester local lee 16 trozos (su coste
+La digestión se **trocea según la ventana de contexto del modelo observe**, y el tope
+de trozos depende de la localidad: un modelo observe local lee 16 trozos (su coste
 marginal es tiempo de reloj en hardware que ya pagaste), mientras que uno en la
 nube **rechaza** de plano el trabajo troceado, porque spill ya acotó el daño
 gratis. Esa constante es el argumento híbrido en miniatura.
@@ -261,7 +318,7 @@ src/
   core/        types · transcript (log solo-añadir) · loop · guards · steering
   context/     lens + PrefixGuard · spill · repair
   models/      router · react-port · providers/{anthropic,openai,ollama,scripted}
-  steps/       digester · verifier · subagent · react · prompts · sections
+  steps/       observe · verify · subagent · react · prompts · sections
   tools/       registry · builtin · edit/glob/grep
   cache/       limits (breakpoints, alcance, mínimos) · keeper
   session/     store (SQLite+FTS5) · persist · search-tool
@@ -276,16 +333,16 @@ honesta de lo que sigue sin resolver.
 ## Pruebas y benchmark
 
 ```bash
-npm test               # 160 pruebas
+npm test               # 177 pruebas
 npm run bench          # offline, determinista, gratis — coste del mecanismo
 npm run bench:live     # modelos reales — la pregunta de la corrección
 ```
 
 El benchmark compara cada mecanismo contra un control, sobre tareas elegidas para
 que cada uno tenga un caso donde debería ganar y otro donde solo puede costar.
-Medido: el digester es **un 88% más barato en su caso y un 43% más caro donde no
+Medido: el modelo observe es **un 88% más barato en su caso y un 43% más caro donde no
 puede ayudar**, con un neto de **−58%** en cuatro tareas. Se amortizó de
-inmediato al detectar un bug en el que el digester se ejecutaba, se facturaba y
+inmediato al detectar un bug en el que el modelo observe se ejecutaba, se facturaba y
 su salida se descartaba en silencio.
 
 Requiere Node ≥ 22.5 (por el `node:sqlite` integrado).

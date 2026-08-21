@@ -15,6 +15,8 @@ export interface Row {
   cacheHitRate: number;
   prefixBreaks: number;
   calls: number;
+  /** Calls a routing policy diverted off the default route. */
+  escalations: number;
 }
 
 /**
@@ -47,7 +49,7 @@ export function report(rows: Row[], opts: { scripted: boolean; tasks: BenchTask[
         "that is the positive delta you see on tasks it cannot help with, and it is\n" +
         "real. The negative deltas are where it earned its place.\n" +
         "\n" +
-        "CAVEAT: the scripted driver never spawns a subagent, so `cloud+subagent`\n" +
+        "CAVEAT: the scripted think model never spawns a subagent, so `cloud+subagent`\n" +
         "here is pure fixed overhead with none of the benefit. It is a floor, not a\n" +
         "verdict. Only the live run can price the isolation it buys.\n" +
         "\n" +
@@ -81,8 +83,9 @@ export function report(rows: Row[], opts: { scripted: boolean; tasks: BenchTask[
             ? "—"
             : "n/a";
       // Did the mechanism actually do anything on this task?
-      const engaged = r.localIn > 0 ? "" : r.config.includes("digest") || r.config === "hybrid" ? "  (idle)" : "";
-      const verdict = opts.scripted ? engaged : r.ok ? "  ok" : "  WRONG";
+      const engaged = r.localIn > 0 ? "" : r.config.includes("digest") || r.config.startsWith("hybrid") ? "  (idle)" : "";
+      const escalated = r.escalations > 0 ? `  [${r.escalations} escalation(s)]` : "";
+      const verdict = (opts.scripted ? engaged : r.ok ? "  ok" : "  WRONG") + escalated;
       out.push(
         pad(r.config, 20) +
           pad(`${tok(r.cloudIn)}/${tok(r.cloudOut)}`, 16) +

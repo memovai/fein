@@ -32,46 +32,49 @@ FE!N splits the loop into **slots** and lets any model fill any slot:
 
 | Slot | Job | Difficulty | Natural home |
 |---|---|---|---|
-| `driver` | Decide what happens next | Hard reasoning | Cloud frontier model |
-| `digester` | Compress bulky observations | Extraction | Local 3–7B |
-| `verifier` | Gate a subagent's mutation | Judgment, rare | Cloud (cheap because it is rare) |
-| `titler` | Name the session | Trivial | Anything |
+| `think` | Decide what happens next | Hard reasoning | Cloud frontier model |
+| `observe` | Compress bulky observations | Extraction | Local 3–7B |
+| `verify` | Gate a subagent's mutation | Judgment, rare | Cloud (cheap because it is rare) |
+| `title` | Name the session | Trivial | Anything |
+
+The names follow ReAct's Thought/Observation vocabulary — see the README's slot
+section for why there is no `action` slot.
 
 ```ts
 router
-  .bind("driver",   cloudSonnet)
-  .bind("digester", localQwen3B, { fallbacks: [cloudSonnet] })
-  .bind("verifier", cloudSonnet);
+  .bind("think",   cloudSonnet)
+  .bind("observe", localQwen3B, { fallbacks: [cloudSonnet] })
+  .bind("verify",  cloudSonnet);
 ```
 
 The loop code does not change when you rebind. That is the whole point: the
 same harness runs all-cloud, all-local, or any mixture, and you can measure the
 difference instead of arguing about it.
 
-### Why the digester is the highest-value delegation
+### Why the observe model is the highest-value delegation
 
 Of everything a small local model could do in this loop, exactly one job has all
 four of the properties that make delegation pay:
 
 1. **Its output is smaller than its input.** This is the whole game and it is
    rarer than it sounds. A stage that takes a short input and produces a short
-   output cannot save you anything — there is nothing to compress. The digester
-   takes 3000 tokens and returns 200.
+   output cannot save you anything — there is nothing to compress. The observe
+   model takes 3000 tokens and returns 200.
 
 2. **The saving compounds.** A tool result does not cost you once. It sits in
    the prompt prefix for every remaining turn of the session. Compressing 20k to
    200 is a saving multiplied by however many turns are left — and it reclaims
    context window, which is scarcer than money.
 
-3. **The driver's authority is untouched.** The digester runs on the *return*
-   path, after the driver already chose the command and the tool already ran. It
-   changes what the driver reads, never what the driver decided. That is what
+3. **The think model's authority is untouched.** The observe model runs on the *return*
+   path, after the think model already chose the command and the tool already ran. It
+   changes what the think model reads, never what the think model decided. That is what
    makes it composable with everything else.
 
 4. **The data never leaves the machine.** This is the one a cheap *cloud* model
    cannot give you at any price. A 20k-line log full of customer records, stack
    traces, and internal hostnames is summarized locally; only the summary
-   crosses the network. Swap the local digester for a cheap cloud subagent and
+   crosses the network. Swap the local observe model for a cheap cloud subagent and
    you have saved the same tokens while shipping every byte to a vendor.
 
 The guard rails matter as much as the mechanism. Errors are never digested — a
@@ -83,7 +86,7 @@ paraphrase of the truth is worse than not calling at all.
 
 ### What we removed, and why — the toolformer
 
-An earlier version of FE!N had a fifth slot. The driver would emit an *intent*
+An earlier version of FE!N had a fifth slot. The think model would emit an *intent*
 (`delegate({tool: "shell", intent: "run npm test"})`) and a local model would
 materialize the concrete arguments. The argument was: arguments are verbose,
 the decision behind them is short, so stop paying frontier prices for typing.
@@ -95,7 +98,7 @@ The intent must contain enough information to reconstruct the arguments. Our own
 toolformer prompt said so explicitly — *"copy concrete values verbatim"*,
 *"never invent a path that was not given to you"* — and the local model was
 given no directory listing, no file contents, no transcript. It had strictly
-*less* information than the driver. **It could not compress, because it could
+*less* information than the think model. **It could not compress, because it could
 not expand.** Information cannot be created from nothing.
 
 Measured across every realistic call in this codebase:
@@ -111,9 +114,9 @@ Never cheaper. Not once. Plus three costs that do not show up as output tokens:
 - The `delegate` schema was **171 tokens — 68% the size of the entire toolset it
   delegated to** — in every request, permanently.
 - `shell` and `write_file` are side-effecting, so every delegated call to them
-  took an extra verifier round trip. `shell` was the tool the schema explicitly
+  took an extra verify-model round trip. `shell` was the tool the schema explicitly
   advertised for delegation.
-- **The driver's context never learned which command actually ran.** It saw an
+- **The think model's context never learned which command actually ran.** It saw an
   intent and a result; the real arguments went to the UI trace only. A context
   regression on top of a token regression.
 
@@ -121,10 +124,10 @@ No experiment flips this — the constraint is logical, not empirical. Deleting 
 made the demo cheaper ($0.0128 → $0.0118) for an identical outcome.
 
 The lesson generalizes: **delegate a stage only when the delegate can produce
-more than it was given, or knows something the caller does not.** The digester
+more than it was given, or knows something the caller does not.** The observe model
 qualifies on the first count. A future "local resolver" — one that holds a
 workspace index and can turn "the config file" into a concrete path, eliminating
-a lookup turn the driver would otherwise spend — would qualify on the second.
+a lookup turn the think model would otherwise spend — would qualify on the second.
 Pure transcription qualifies on neither.
 
 ### Measured
@@ -147,7 +150,7 @@ summary (all four tasks)
   cloud+local-digest  $0.00592     -58%
 ```
 
-Both halves matter and the report prints both. The digester is **88% cheaper on
+Both halves matter and the report prints both. The observe model is **88% cheaper on
 its case** and **43% more expensive on a task it cannot help with**, because its
 tool schema and its paragraph of system prompt are paid on every request whether
 or not it fires. Net across the four: 58% cheaper, because the bulky case
@@ -155,11 +158,11 @@ dominates in absolute terms. That is the honest shape of the claim — not "loca
 models make everything cheaper", but "compression pays enormously where there is
 something to compress, and costs a little everywhere else."
 
-The benchmark earned its cost immediately: it found a bug where the digester ran,
+The benchmark earned its cost immediately: it found a bug where the observe model ran,
 billed, and had its output discarded. `maybeCompact()` rendered through the real
 lens to estimate context size, which *froze* every event (Rule 2's mechanism);
 the subsequent real render then saw frozen events and fell back to raw. The
-symptom was identical cloud token counts with and without a digester bound —
+symptom was identical cloud token counts with and without an observe model bound —
 invisible in every test we had, obvious the moment two configurations were
 priced side by side.
 
@@ -188,7 +191,7 @@ The rule:
 > spawn re-establishes context from nothing and you pay for that twice.
 
 A third mechanism belongs on this table and is not built: **programmatic tool
-calling**, where the driver emits a *script* that orchestrates many tool calls,
+calling**, where the think model emits a *script* that orchestrates many tool calls,
 intermediates stay in the execution environment, and only the final result
 returns. For "read fifty files and find X" it beats a subagent outright — no
 fresh system prompt, no natural-language round trip, and the filtering is
@@ -264,16 +267,16 @@ on the critical path, and is lossy in a way nobody can undo.
 a bounded head/tail preview, and hand the model the path with a retrieval hint.
 
 The two are complementary, and our own fixture proves it — a 332-line log with
-the failure on line 241: the preview **misses it**, the digester finds it.
+the failure on line 241: the preview **misses it**, the observe model finds it.
 Conversely a digest is a paraphrase, and what it drops is gone. So we do both,
 and the lens prefers `digest -> preview -> raw`:
 
 ```
-no digester  ->  bounded preview + locator      (was: unbounded raw text)
-digester     ->  semantic digest + locator      (was: digest, detail gone)
+no observe model  ->  bounded preview + locator      (was: unbounded raw text)
+observe model     ->  semantic digest + locator      (was: digest, detail gone)
 ```
 
-The second row matters most: **spill fixes the digester's worst property.** A
+The second row matters most: **spill fixes the observe model's worst property.** A
 summary that dropped something now has a route back to the source.
 
 Invariants, all tested: the replacement never exceeds the cap (the notice's
@@ -304,20 +307,20 @@ Here is the trap that makes naive "local model summarizes for cloud model"
 designs backfire.
 
 The obvious implementation: tool returns 20k tokens, hand it to the local model,
-substitute the summary in the driver's context. Saves 20k cloud tokens. Ship it.
+substitute the summary in the think model's context. Saves 20k cloud tokens. Ship it.
 
-But if the raw output has *already been rendered* to the driver once,
+But if the raw output has *already been rendered* to the think model once,
 substituting the digest **rewrites history**. The provider's cached prefix
 diverges at that message, and you throw away the KV state for the entire
 conversation to save a few hundred tokens. On a 60k-token session that trade is
 enormously negative.
 
 So FE!N enforces a timing rule: digestion happens on the **ingest path**, before
-the driver's next render. `MainLens` tracks which events it has already rendered
+the think model's next render. `MainLens` tracks which events it has already rendered
 and refuses to substitute a digest for a frozen event. A late digest is simply
 inert — the raw output stays. **Brevity never wins over prefix stability.**
 
-There is a corollary that is easy to miss: this means the digester is on the
+There is a corollary that is easy to miss: this means the observe model is on the
 critical path for latency. You cannot digest lazily or in the background and
 patch it in later. If the local model is slow, the whole turn is slow. This is
 the real cost of the design, and it is why `keep_alive` on the local runtime
@@ -325,7 +328,7 @@ matters so much (§5).
 
 ### Rule 2c — A delegated stage must fit the model doing it
 
-The digester exists to save tokens, so it must not be the thing that spends
+The observe model exists to save tokens, so it must not be the thing that spends
 them. Two limits follow, and both were violated before they were written down:
 
 **The input must fit the delegate's context window.** Sending a 200k result to
@@ -335,7 +338,7 @@ expensive model instead. The window is the budget; oversized input is chunked.
 **The delegation must be cheaper than not delegating.** That comparison is
 against whatever the *floor* already gives you, not against doing nothing. Once
 spill bounds an oversized result for free, the digest is competing with an 8KB
-preview, and several cloud calls do not clear that bar. A local digester does,
+preview, and several cloud calls do not clear that bar. A local observe model does,
 because its marginal cost is wall-clock rather than money.
 
 Generalised: **check what the cheap mechanism already achieved before paying
@@ -409,10 +412,10 @@ pay for it deliberately.
 
 ### Rule 5 — Harness-internal work never touches the main channel
 
-Every delegated inference — a digest attempt, a verifier verdict — goes to a
-**side channel**. The driver's transcript sees only outcomes.
+Every delegated inference — a digest attempt, a verdict from the verify model —
+goes to a **side channel**. The think model's transcript sees only outcomes.
 
-This is partly context hygiene: the driver should not read the harness talking
+This is partly context hygiene: the think model should not read the harness talking
 to itself. But it is also an append-only-ness argument — the main channel must
 grow only with settled facts, so that its render is stable. Side channels are
 fully retained for auditing, so nothing is hidden; it is filed elsewhere.
@@ -423,7 +426,7 @@ never learns of it.
 
 ### Rule 6 — Concurrency must not be observable in the record
 
-When the driver issues three tool calls and we execute them concurrently, they
+When the think model issues three tool calls and we execute them concurrently, they
 finish in nondeterministic order. If results are appended in *completion* order,
 the transcript depends on machine timing — replay the same session twice and you
 get different prefixes, and cache lookups miss for reasons nobody can reproduce.
@@ -539,27 +542,27 @@ Letting an agent near a shell requires an asymmetry argument:
 
 But *whose* mistake is it? That question is what tiers the trust:
 
-- A call the **driver** makes executes as-is. The driver is acting on the user's
+- A call the **think model** makes executes as-is. The think model is acting on the user's
   own instruction and is the authority. Second-guessing it with another model
   would be a tax on every turn to catch a rare failure.
 - A call a **subagent** makes is an agent acting on a task string that *another
   model* wrote — no human approved those exact words. That is where a drifting
   instruction compounds silently instead of surfacing: the parent asked for one
   thing, the task string drifted, and the subagent faithfully executes the
-  drift. So at depth > 0, side-effecting calls go past the `verifier` first.
+  drift. So at depth > 0, side-effecting calls go past the `verify` model first.
 - **Read-only** calls run unverified at every depth. Bounded downside, and speed
   was the point.
-- If **no verifier is bound**, a subagent's side-effecting call is *refused*.
+- If **no verify model is bound**, a subagent's side-effecting call is *refused*.
   Fail closed. A missing safety component must not silently become no safety
   component.
 
 Two mechanisms cover safety here and they are not interchangeable. **Hooks** are
 the rule-shaped half: deterministic policy that needs no judgment and should not
-pay for a model round trip ("never run `rm -rf`"). The **verifier** is the
+pay for a model round trip ("never run `rm -rf`"). The **verify model** is the
 model-shaped half, for the question no rule can express: *does this call still
 resemble what was asked?*
 
-The verifier is itself a slot, so you choose the paranoia level. Because it only
+`verify` is itself a slot, so you choose the paranoia level. Because it only
 fires on subagent mutations — rare — binding it to the expensive model costs
 almost nothing.
 
@@ -578,8 +581,8 @@ calls 4  ·  $0.0118  ·  0.2s
   cloud    3 calls  3.9k in / 79 out  $0.0118
   cache  hit 5.8%  read 419 / fresh 6.9k  saved $0.0011
   offload  ~$0.0108 of cloud spend served locally
-  driver        3x    $0.0118  (0 local / 3 cloud)
-  digester      1x    $0.0000  (1 local / 0 cloud)
+  think         3x    $0.0118  (0 local / 3 cloud)
+  observe       1x    $0.0000  (1 local / 0 cloud)
 ```
 
 Note the 5.8% hit rate in that three-turn demo. It is low, and it is shown
@@ -667,7 +670,7 @@ local  → 16 chunks   marginal cost is wall-clock on hardware you already own
 cloud  →  1 chunk    a result needing more is declined outright
 ```
 
-A cloud digester facing a result too large for one call now **refuses**. That
+A cloud observe model facing a result too large for one call now **refuses**. That
 looks strange until you notice spill: an oversized result is *already* bounded
 to a few KB for free, losslessly, with a retrieval path. So chunked cloud
 digestion is not competing against 200k raw tokens — it is competing against an
@@ -682,33 +685,52 @@ and digestion both existed; each alone looks fine.
 
 **Digest quality is unmeasured.** We know digests are *smaller*. We do not
 systematically know whether they preserve the decision-relevant facts. The right
-instrument is a task-level A/B (same task, digester on vs off, compare success
-rate), not a summarization benchmark. Until that exists, the digester's value is
+instrument is a task-level A/B (same task, observe model on vs off, compare success
+rate), not a summarization benchmark. Until that exists, the observe model's value is
 argued rather than demonstrated, and errors are excluded from digestion as a
 blunt hedge.
 
-**Speculative delegation is tempting and unproven.** While the cloud driver is
+**Speculative delegation is tempting and unproven.** While the cloud think model is
 generating, the local model could speculatively execute the most likely next
 tool call. If it guesses right you hide the entire tool latency. If it guesses
 wrong you have run a tool nobody asked for — fine for reads, unacceptable for
 writes, and it pollutes the transcript with speculation that must be discarded
 without breaking the prefix. Deliberately not built.
 
-**Routing is static.** Slots are bound at construction. A genuinely adaptive
-harness would notice that the local digester keeps producing digests that get
-rejected as too large for a particular tool, and stop trying for that tool. The information needed is
-already in the ledger; the policy is not written. The risk is that adaptive
-routing makes sessions non-reproducible, which fights §2 Rule 6.
+**Routing is static by default; adaptive routing is opt-in and bounded.** A
+binding may carry a `RoutePolicy` (models/policy.ts): the loop reports facts
+("the guard fired twice", "this digest was rejected", "this request is ~600
+tokens") and the policy — a pure function of those facts — picks a port and a
+thinking level from the binding's declared chain. Three policies ship:
+escalate-on-stuck (guard fires → same port, higher thinking effort; never a
+port swap, because prompt caches are keyed per model and opaque reasoning
+blocks do not replay across models), escalate-on-reject (a digest that fails
+the 70% quality gate gets one retry on a stronger port — the observe slot's
+calls carry a fresh context, so the swap has no cache stake), and right-size
+(trivially small side-slot requests go to the small model). The §2 Rule 6
+tension resolves because every input to a decision is derivable from the
+recorded transcript, and every decision is logged (`route` trace event, ledger
+escalation counts). What remains open: a policy that learns per-tool ("stop
+digesting tool X") — the hints plumbing makes it a small follow-up — and any
+policy driven by latency or error rates, which is inherently nondeterministic
+and stays excluded on purpose. Swapping the *think* port at an epoch boundary
+(compaction restarts from plain text, so nothing would break) is designed but
+not built. What IS built at the other safe boundary: plan-execute delegation —
+bind the `execute` slot and the spawn tool grows a per-step `tier` choice the
+think model fills, an `acceptance` field that forces the plan to say what
+"done" means, and code-enforced fail-fast for light-tier children (first guard
+fire → report the blockage; the planner replans, the harness never re-routes
+on its own).
 
 **Two clocks.** Local models have low, stable latency; cloud models have higher,
 spikier latency. A turn that delegates three times serially can be *slower* than
 one cloud round-trip even while being cheaper. FE!N parallelizes reads, but
 there is no cost/latency policy — no way to say "prefer speed under $X."
 
-**Epoch boundaries are heuristic.** We compact at 75% of the driver's window.
+**Epoch boundaries are heuristic.** We compact at 75% of the think model's window.
 The genuinely right moment is task-structural: compact when a subtask completes,
 because that is when the detail becomes safely discardable. That requires the
-driver to signal task boundaries, which requires prompting it to, which costs
+think model to signal task boundaries, which requires prompting it to, which costs
 tokens on every turn to save tokens occasionally.
 
 Persistence softens this considerably — an epoch now forks a child session and

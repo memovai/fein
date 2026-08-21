@@ -26,8 +26,8 @@ src/
 │
 ├── steps/                The swappable STAGES of the loop
 │   ├── prompts.ts          every string here is a cache prefix — see the header
-│   ├── digester.ts         compress observations before first render
-│   ├── verifier.ts         gate a subagent's side-effecting calls
+│   ├── observe.ts          compress observations before first render
+│   ├── verify.ts           gate a subagent's side-effecting calls
 │   └── subagent.ts         bounded recursive delegation
 │
 ├── tools/                What the agent can DO

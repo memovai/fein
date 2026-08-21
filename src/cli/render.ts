@@ -30,7 +30,7 @@ export function renderTrace(e: FeinTrace): void {
   switch (e.type) {
     case "step":
       stdout.write(
-        `\n${c.dim(`[${e.n}]`)} ${c.bold("driver")} ${c.dim("·")} ${e.model} ` +
+        `\n${c.dim(`[${e.n}]`)} ${c.bold("think")} ${c.dim("·")} ${e.model} ` +
           `${e.locality === "local" ? c.green("local") : c.cyan("cloud")}\n`,
       );
       break;
@@ -88,6 +88,12 @@ export function renderTrace(e: FeinTrace): void {
       break;
     case "steer":
       break; // the CLI echoes this itself, with queue depth
+    case "route":
+      stdout.write(
+        `  ${c.yellow("route")} ${e.slot} -> ${e.model}` +
+          `${e.thinking ? ` thinking=${e.thinking}` : ""} ${c.dim(truncate(e.reason, 70))}\n`,
+      );
+      break;
     case "guard":
       stdout.write(`  ${c.yellow(`guard/${e.kind}`)} ${c.dim(truncate(e.message, 90))}\n`);
       break;

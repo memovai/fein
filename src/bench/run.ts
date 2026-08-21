@@ -9,7 +9,7 @@ import { CONFIGS, realPorts, scriptedPorts, type BenchConfig, type BenchPorts } 
 import { report, type Row } from "./report.js";
 
 /**
- * The benchmark driver.
+ * The benchmark runner.
  *
  * It exists because FE!N makes two empirical claims — delegation saves money,
  * the cache stays hot — and a harness that cannot check its own claims is
@@ -19,7 +19,7 @@ import { report, type Row } from "./report.js";
  * Two modes, and the difference is not cosmetic:
  *
  *   --scripted  Deterministic, free, CI-able. Measures **mechanism overhead**
- *               exactly. `success` is meaningless here — the scripted driver
+ *               exactly. `success` is meaningless here — the scripted think model
  *               always finds the answer — so the report suppresses it.
  *   (default)   Real models. The only mode that can answer the question that
  *               actually matters: is the compressed observation still good
@@ -77,6 +77,7 @@ async function runOne(
     cacheHitRate: s.cache.hitRate,
     prefixBreaks: s.cache.breaks.length,
     calls: s.calls,
+    escalations: s.escalations,
   };
 }
 

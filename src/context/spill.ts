@@ -6,7 +6,7 @@ import type { ToolResult } from "../core/types.js";
 /**
  * Spill: bound an oversized tool result **without a model**.
  *
- * FE!N's digester reaches for an inference every time a tool returns something
+ * FE!N's observe model reaches for an inference every time a tool returns something
  * bulky. That is the right tool for turning 3000 lines of log into "one test
  * failed, here, for this reason" — but it is the wrong tool for the much
  * simpler job of *not putting 3000 lines in the context window*, because it
@@ -22,15 +22,15 @@ import type { ToolResult } from "../core/types.js";
  *
  * They are complementary, and the failing-test fixture shows exactly why. A
  * 332-line test log with the one failure on line 241: head/tail preview
- * **misses it entirely**, while the digester finds it. Conversely the digest is
+ * **misses it entirely**, while the observe model finds it. Conversely the digest is
  * a paraphrase — if it drops the line number, that detail is gone.
  *
- * So: spill always, digest additionally when a digester is bound.
+ * So: spill always, digest additionally when an observe model is bound.
  *
- *   no digester  →  bounded preview + locator      (was: unbounded raw text)
- *   digester     →  semantic digest + locator      (was: digest, detail gone)
+ *   no observe model  →  bounded preview + locator      (was: unbounded raw text)
+ *   observe model     →  semantic digest + locator      (was: digest, detail gone)
  *
- * The second row is the one that matters most: spill fixes the digester's worst
+ * The second row is the one that matters most: spill fixes the observe model's worst
  * property. A digest that drops something now has a retrieval path back to the
  * truth, which turns "lossy" into "summarized, with the source one tool call
  * away".
@@ -125,7 +125,7 @@ export async function spill(args: {
     return { spilled: false, originalBytes, skipReason: "within cap" };
   }
   // An error's exact bytes are what you need precisely when things went wrong,
-  // and errors are rarely the bulky ones. Same rule the digester follows.
+  // and errors are rarely the bulky ones. Same rule the observe model follows.
   if (args.result.isError) {
     return { spilled: false, originalBytes, skipReason: "error output kept verbatim" };
   }

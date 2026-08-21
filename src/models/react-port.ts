@@ -133,7 +133,7 @@ export class ReactPort implements ModelPort {
       }
 
       // Repair in place. The correction and the bad reply stay inside this
-      // port, so the loop's transcript — and the driver's cached prefix — never
+      // port, so the loop's transcript — and the think model's cached prefix — never
       // learn the model fumbled.
       attempt++;
       messages = [

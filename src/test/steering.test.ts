@@ -87,7 +87,7 @@ function agentThatLoops(trace: FeinTrace[], onTurn?: (agent: Agent, turn: number
   });
 
   const agent = new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: reg,
     subagents: false,
     maxSteps: 8,
@@ -241,7 +241,7 @@ test("a steer arriving at the last boundary reaches the wrap-up (regression)", a
   });
 
   agent = new Agent({
-    router: new Router().bind("driver", port),
+    router: new Router().bind("think", port),
     tools: reg,
     subagents: false,
     maxSteps: 2,

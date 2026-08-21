@@ -89,7 +89,7 @@ export class SessionStore {
 
       -- Searchable text only. Tool output and side-channel noise are excluded
       -- at write time (see searchableText) so recall surfaces decisions rather
-      -- than the 3000-line log the digester already threw away.
+      -- than the 3000-line log the observe model already threw away.
       CREATE VIRTUAL TABLE IF NOT EXISTS event_fts USING fts5(
         text, event_id UNINDEXED, session_id UNINDEXED, tokenize = 'porter'
       );
@@ -274,7 +274,7 @@ function toSessionRow(r: Record<string, unknown>): SessionRow {
  * What is worth indexing.
  *
  * Deliberately *not* everything. Tool output is excluded because it is bulky,
- * low-signal, and already summarized by the digester — indexing it would make
+ * low-signal, and already summarized by the observe model — indexing it would make
  * every search return log lines instead of decisions. Side-channel events are
  * excluded because they are the harness talking to itself. What remains is
  * what a person would actually search for: what was asked, what was concluded,

@@ -12,7 +12,7 @@ command are treated as one job, priced as one job, and sent to one model.
 
 FE!N splits the loop into **slots** and lets you bind a different model to each —
 so a frontier model does the thinking while a 3B model on your laptop does the
-reading. TypeScript, **zero runtime dependencies**, 160 tests.
+reading. TypeScript, **zero runtime dependencies**, 177 tests.
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -23,9 +23,9 @@ const cloud = new AnthropicPort({ id: "cloud", model: "claude-sonnet-5",
 const local = new OllamaPort({ id: "local", model: "qwen2.5:3b" });
 
 const router = new Router()
-  .bind("driver",   cloud)                          // decides what happens
-  .bind("digester", local, { fallbacks: [cloud] })  // compresses observations
-  .bind("verifier", cloud);                         // gates subagent mutations
+  .bind("think",   cloud)                          // decides what happens
+  .bind("observe", local, { fallbacks: [cloud] })  // compresses observations
+  .bind("verify",  cloud);                         // gates subagent mutations
 
 await new Agent({ router, tools: defaultTools() }).run("Why is the test suite failing?");
 ```
@@ -45,12 +45,12 @@ npm install && npm run demo
 
 ```
 bindings
-  driver      cloud/sonnet-sim [cloud]
-  digester    local/qwen3b-sim [local] -> cloud/sonnet-sim
+  think       cloud/sonnet-sim [cloud]
+  observe     local/qwen3b-sim [local] -> cloud/sonnet-sim
 
-[2] driver · cloud/sonnet-sim cloud
+[2] think · cloud/sonnet-sim cloud
 A TypeScript project. Running the test suite to find the failure.
-  tool shell(command: "npm test") via driver
+  tool shell(command: "npm test") via think
        ok $ npm test ok 1 - unit/parser handles case 1 …
   digest shell: 3100 → 43 tok (99% smaller · local/qwen3b-sim)
   cache: prefix stable — 3 msg reused, 2 new
@@ -62,7 +62,7 @@ calls 4  ·  $0.0024  ·  0.2s
   cache  hit 10.1%   saved $0.0011
 ```
 
-The driver decided to run `npm test` **itself** — its authority is untouched —
+The think model decided to run `npm test` **itself** — its authority is untouched —
 but it never saw the 330-line log. A local model compressed it to 43 tokens
 first. That saving compounds over every remaining turn, it reclaims context
 window, and the raw log never left the machine.
@@ -71,17 +71,67 @@ window, and the raw log never left the machine.
 
 | Slot | Job | Why it's separable |
 |---|---|---|
-| `driver` | Decide what happens next | The hard reasoning. Keep it frontier. |
-| `digester` | Compress bulky output before the driver sees it | Output smaller than input; the saving compounds; the raw data never leaves the machine |
-| `verifier` | Gate a subagent's world-changing calls | Rare, so it can afford to be expensive |
-| `titler` | Name the session | Trivial |
+| `think` | Decide what happens next | The hard reasoning. Keep it frontier. |
+| `observe` | Compress bulky output before the think model sees it | Output smaller than input; the saving compounds; the raw data never leaves the machine |
+| `verify` | Gate a subagent's world-changing calls | Rare, so it can afford to be expensive |
+| `title` | Name the session | Trivial |
+| `execute` | Drive a delegated sub-task end to end | The light tier of plan-execute delegation. Unbound by default — an unbound slot advertises nothing |
+
+The names are ReAct's. Thought → `think`, which also emits the Action — native
+tool calling fuses thought and action into one completion, and there is no
+`action` slot because tools are executed by code, not a model. Observation →
+`observe`. `verify` and `title` are control-plane roles ReAct doesn't have.
 
 Any slot takes any model. Every slot takes a fallback chain, so a dead local
 runtime degrades that slot to the cloud rather than taking the session down.
 
-**There was a fifth slot and we deleted it.** A `toolformer` turned the driver's
-one-line intent into concrete tool arguments. Measured, it cost **+11 to +15
-driver output tokens on every call and saved zero** — the intent has to carry
+**Bindings are static by default; adaptive routing is opt-in per slot.** A
+binding can carry a policy that switches on facts the loop reports, never on
+wall-clock or luck — so the same transcript re-derives the same decisions, and
+every decision lands in the trace and the ledger:
+
+- `escalate-on-stuck` (for `think`): the loop guard notices the model going in
+  circles → same port, higher thinking effort. Never a mid-session port swap:
+  prompt caches are keyed per model, and one model's signed reasoning blocks
+  are a provider error when replayed to another. The effort dial is the
+  escalation knob; the model switch is not.
+- `escalate-on-reject` (for `observe`): a local digest that fails the quality
+  gate gets one retry on the cloud port. The observe slot's calls carry a
+  fresh, small context each time, so this swap has no cache stake at all.
+- `right-size` (side slots only): trivially small requests go to the small
+  model even when the slot's default is big.
+
+The one safe place to re-point `think` itself is a **subagent boundary** —
+fresh context, nothing to break. Two ways to use it:
+
+- **Static**: set `subagents.thinkSlot` and every child runs on that binding.
+- **Plan-execute** (bind the `execute` slot to enable): the spawn tool gains a
+  `tier` parameter the think model fills per step — `"light"` runs the whole
+  sub-task on the execute binding, `"heavy"` on the think model's own. An
+  `acceptance` parameter makes the planner state what "done" means, and the
+  child reports against it. The per-spawn choice beats `thinkSlot` config,
+  which beats inheritance.
+
+Two lessons from everyone who tried this are enforced in code, not prose. A
+cheap model that starts going in circles rarely recovers, so a light-tier
+child **stops on the first guard fire and reports what blocked it** — the
+planner escalates, re-splits, or does the step itself; the harness never
+re-routes on its own. And delegation quality comes from decomposition, not
+from the model's raw judgment, so the tier guidance lives in the tool schema
+and a frozen prompt section that only exists when `execute` is bound —
+otherwise the whole feature costs zero tokens.
+
+```jsonc
+// config: the object form of a binding carries the policy
+"bind": {
+  "think":   { "port": "cloud", "policy": { "kind": "escalate-on-stuck" } },
+  "observe": { "port": "local", "policy": { "kind": "escalate-on-reject", "to": "cloud" } }
+}
+```
+
+**There was another slot and we deleted it.** A `toolformer` turned the think
+model's one-line intent into concrete tool arguments. Measured, it cost **+11 to
++15 think-model output tokens on every call and saved zero** — the intent has to carry
 the arguments verbatim, so it is structurally a superset of what it replaces.
 The write-up with numbers is in [DESIGN.md](./DESIGN.md). The lesson:
 **delegate a stage only when the delegate can produce more than it was given, or
@@ -137,13 +187,13 @@ idempotent, never exceeds its cap, never grows.
 **Digest** (one inference): a local model compresses the full text semantically.
 
 They are complementary, and the fixture proves it — a 332-line log with the one
-failure on line 241: the preview **misses it**, the digester finds it. So both
+failure on line 241: the preview **misses it**, the observe model finds it. So both
 run, and the lens prefers `digest → preview → raw`. Spill also fixes the
-digester's worst property: a summary that dropped a detail now has a route back
+observe model's worst property: a summary that dropped a detail now has a route back
 to the source.
 
-Digestion is **chunked to the digester's context window**, and the chunk cap is
-locality-aware — a local digester reads 16 chunks (marginal cost is wall-clock),
+Digestion is **chunked to the observe model's context window**, and the chunk cap is
+locality-aware — a local observe model reads 16 chunks (marginal cost is wall-clock),
 a cloud one declines chunked work outright, because spill already bounded the
 damage for free. That constant is the hybrid argument in miniature.
 
@@ -245,7 +295,7 @@ src/
   core/        types · transcript (append-only log) · loop · guards · steering
   context/     lens + PrefixGuard · spill · repair
   models/      router · react-port · providers/{anthropic,openai,ollama,scripted}
-  steps/       digester · verifier · subagent · react · prompts · sections
+  steps/       observe · verify · subagent · react · prompts · sections
   tools/       registry · builtin · edit/glob/grep
   cache/       limits (breakpoints, lookback, minimums) · keeper
   session/     store (SQLite+FTS5) · persist · search-tool
@@ -260,16 +310,16 @@ honest list of what is still unsolved.
 ## Tests and benchmark
 
 ```bash
-npm test               # 160 tests
+npm test               # 177 tests
 npm run bench          # offline, deterministic, free — mechanism cost
 npm run bench:live     # real models — the correctness question
 ```
 
 The benchmark prices each mechanism against a control on tasks chosen so each
 has a case it should win and a case where it can only cost. Measured: the
-digester is **88% cheaper on its case, 43% more expensive where it cannot help**,
+observe model is **88% cheaper on its case, 43% more expensive where it cannot help**,
 netting **−58%** across four tasks. It paid for itself immediately by catching a
-bug where the digester ran, billed, and had its output silently discarded.
+bug where the observe model ran, billed, and had its output silently discarded.
 
 Requires Node ≥ 22.5 (for built-in `node:sqlite`).
 

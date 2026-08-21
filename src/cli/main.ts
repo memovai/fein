@@ -40,7 +40,7 @@ async function cmdDemo(): Promise<void> {
   stdout.write(`\n${c.bold("ledger")}\n${agent.ledger.format({ in: 3, out: 15 })}\n`);
   stdout.write(
     `\n${c.dim(
-      "The driver decided to run `npm test` itself — its authority is untouched — but it never\n" +
+      "The think model decided to run `npm test` itself — its authority is untouched — but it never\n" +
         "saw the 330-line log. A local model compressed it to 43 tokens first. That saving\n" +
         "compounds over every remaining turn, and the raw log never left this machine.\n",
     )}`,
@@ -107,7 +107,7 @@ async function cmdChat(configPath?: string, resume?: string): Promise<void> {
 
       if (line === "/exit" || line === "/quit") break;
       if (line === "/ledger") {
-        stdout.write(`${agent.ledger.format(driverRates(cfg))}\n`);
+        stdout.write(`${agent.ledger.format(thinkRates(cfg))}\n`);
         continue;
       }
       if (line === "/bindings") {
@@ -138,7 +138,7 @@ async function cmdChat(configPath?: string, resume?: string): Promise<void> {
       } catch (err) {
         stdout.write(c.red(`\nerror: ${err instanceof Error ? err.message : String(err)}\n`));
       }
-      stdout.write(`\n${c.dim(agent.ledger.format(driverRates(cfg)))}\n`);
+      stdout.write(`\n${c.dim(agent.ledger.format(thinkRates(cfg)))}\n`);
     }
   } finally {
     rl.close();
@@ -146,9 +146,10 @@ async function cmdChat(configPath?: string, resume?: string): Promise<void> {
   }
 }
 
-function driverRates(cfg: FeinConfig): { in: number; out: number } | undefined {
-  const driverId = cfg.bind.driver;
-  const id = Array.isArray(driverId) ? driverId[0] : driverId;
+function thinkRates(cfg: FeinConfig): { in: number; out: number } | undefined {
+  const target = cfg.bind.think;
+  const id =
+    typeof target === "string" ? target : Array.isArray(target) ? target[0] : target?.port;
   const port = cfg.ports.find((p) => p.id === id);
   return port ? { in: port.costPerMTokIn ?? 0, out: port.costPerMTokOut ?? 0 } : undefined;
 }
@@ -163,7 +164,7 @@ async function cmdOnce(prompt: string, configPath?: string): Promise<void> {
   });
   try {
     await ws.agent.run(prompt);
-    stdout.write(`\n${c.dim(ws.agent.ledger.format(driverRates(cfg)))}\n`);
+    stdout.write(`\n${c.dim(ws.agent.ledger.format(thinkRates(cfg)))}\n`);
     if (ws.agent.session) stdout.write(c.dim(`session: ${ws.agent.session.id}\n`));
   } finally {
     ws.close();
