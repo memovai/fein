@@ -10,6 +10,7 @@ import { PersistentSession } from "../session/persist.js";
 import { sessionSearchTool, sessionLineageTool } from "../session/search-tool.js";
 import { SkillLibrary, skillTools } from "../skills/skill.js";
 import { HookRunner } from "../hooks/hooks.js";
+import { sweepSpill } from "../context/spill.js";
 import { fenceProjectContext } from "../steps/prompts.js";
 
 /**
@@ -76,6 +77,11 @@ export interface Workspace {
 
 export async function openWorkspace(opts: WorkspaceOptions): Promise<Workspace> {
   const root = join(opts.cwd, ".fein");
+
+  // Fire-and-forget: expired spill dumps age out on open. Not awaited — a
+  // slow disk must not delay the session, and a failed sweep costs nothing
+  // but the bytes it was about to reclaim.
+  void sweepSpill(join(root, "spill"));
 
   // ── identity (tier 1) and project context (tier 2) ────────────────────────
   const found: string[] = [];

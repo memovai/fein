@@ -10,7 +10,7 @@
 压缩 3000 行测试日志、拦住一条危险命令 —— 被当成一件事、按一件事计价、发给同一个模型。
 
 FE!N 把循环拆成 **slot**,让你给每个 slot 绑不同的模型:前沿模型负责思考,
-你笔记本上的 3B 模型负责阅读。TypeScript,**零运行时依赖**,185 个测试。
+你笔记本上的 3B 模型负责阅读。TypeScript,**零运行时依赖**,186 个测试。
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -284,7 +284,7 @@ src/
 ## 测试与基准
 
 ```bash
-npm test               # 185 个测试
+npm test               # 186 个测试
 npm run bench          # 离线、确定性、免费 —— 机制本身的成本
 npm run bench:live     # 真实模型 —— 回答正确性问题
 ```

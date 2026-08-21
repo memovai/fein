@@ -26,6 +26,8 @@ export {
   spill,
   headTail,
   FileSpillStore,
+  sweepSpill,
+  SPILL_MAX_AGE_DAYS,
   DEFAULT_SPILL_POLICY,
   type SpillPolicy,
   type SpillOutcome,

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Transcript } from "../core/transcript.js";
@@ -10,7 +10,7 @@ import {
   findUnpairedCalls,
   findOrphanResults,
 } from "../context/repair.js";
-import { spill, headTail, FileSpillStore, DEFAULT_SPILL_POLICY } from "../context/spill.js";
+import { spill, headTail, FileSpillStore, sweepSpill, DEFAULT_SPILL_POLICY } from "../context/spill.js";
 import { digest, chunkByLines, DEFAULT_DIGEST_POLICY } from "../steps/observe.js";
 import { Router } from "../models/router.js";
 import { escalateOnReject } from "../models/policy.js";
@@ -190,6 +190,35 @@ test("spill skips errors and exempt tools", async () => {
     policy,
   });
   assert.equal(exempt.spilled, false, "spilling read would loop: read → spill → read");
+});
+
+test("sweepSpill ages out only its own expired files", async () => {
+  const dir = await tmp();
+  const store = new FileSpillStore(dir);
+  await store.save("shell", "fresh dump");
+
+  // A dump written 20 days ago (timestamp prefix is the age authority)...
+  const old = Date.now() - 20 * 24 * 60 * 60 * 1000;
+  await writeFile(join(dir, `${old}-abcdef01-shell.txt`), "expired dump", "utf8");
+  // ...and a file the store did not write, no matter how old it looks.
+  await writeFile(join(dir, "notes.txt"), "user file", "utf8");
+
+  const swept = await sweepSpill(dir);
+  assert.equal(swept.removed, 1);
+  assert.ok(swept.freedBytes > 0);
+
+  const left = (await readdir(dir)).sort();
+  assert.equal(left.length, 2, "the fresh dump and the foreign file survive");
+  assert.ok(left.includes("notes.txt"), "sweeps only what the store wrote");
+
+  // Deterministic: age comes from the `now` parameter, not the wall clock.
+  const future = Date.now() + 30 * 24 * 60 * 60 * 1000;
+  const later = await sweepSpill(dir, { now: future });
+  assert.equal(later.removed, 1, "the fresh dump expires once `now` says so");
+
+  // A missing directory is a no-op, not an error.
+  const none = await sweepSpill(join(dir, "does-not-exist"));
+  assert.deepEqual(none, { removed: 0, freedBytes: 0 });
 });
 
 test("a cap too small for the notice keeps the original (regression)", async () => {

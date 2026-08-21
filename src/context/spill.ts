@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ToolResult } from "../core/types.js";
@@ -103,6 +103,57 @@ export class FileSpillStore implements SpillStore {
     await writeFile(path, text, "utf8");
     return path;
   }
+}
+
+/** How long a spill file outlives the turn that wrote it, by default. */
+export const SPILL_MAX_AGE_DAYS = 14;
+
+/**
+ * Delete spill files older than `maxAgeDays`. Returns what was removed.
+ *
+ * Spill files are working-set cache, not the record: the transcript keeps the
+ * bounded preview and the locator, and the session store keeps both durably.
+ * What ages out is only the full raw text's *retrieval path* — an acceptable
+ * degradation for a dump nobody has re-read in two weeks, and much better
+ * than the observed alternative (hundreds of orphaned dumps accreting
+ * forever, because every demo, bench, and run writes and nothing deletes).
+ *
+ * Age is parsed from the filename's timestamp prefix (the write moment this
+ * store stamps in `save`), not filesystem mtime — a `touch` or copy must not
+ * resurrect a dump. Files that do not match the store's naming pattern are
+ * left alone: this sweeps only what it wrote.
+ */
+export async function sweepSpill(
+  dir: string,
+  opts?: { maxAgeDays?: number; now?: number },
+): Promise<{ removed: number; freedBytes: number }> {
+  const maxAgeMs = (opts?.maxAgeDays ?? SPILL_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000;
+  const now = opts?.now ?? Date.now();
+  let removed = 0;
+  let freedBytes = 0;
+
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return { removed, freedBytes }; // no spill dir, nothing to sweep
+  }
+
+  for (const name of names) {
+    const stamp = /^(\d{10,})-[0-9a-f]{8}-.*\.txt$/.exec(name)?.[1];
+    if (!stamp) continue;
+    if (now - Number(stamp) <= maxAgeMs) continue;
+    const path = join(dir, name);
+    try {
+      const size = (await stat(path)).size;
+      await unlink(path);
+      removed++;
+      freedBytes += size;
+    } catch {
+      // Raced with another process or already gone — either way, not ours to report.
+    }
+  }
+  return { removed, freedBytes };
 }
 
 export async function spill(args: {

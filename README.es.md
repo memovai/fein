@@ -13,7 +13,7 @@ cobran como un solo trabajo y se le mandan a un solo modelo.
 
 FE!N parte el bucle en **slots** y te deja asignar un modelo distinto a cada uno:
 que el modelo de frontera piense y que un modelo de 3B en tu portátil lea.
-TypeScript, **cero dependencias en tiempo de ejecución**, 185 pruebas.
+TypeScript, **cero dependencias en tiempo de ejecución**, 186 pruebas.
 
 ```ts
 import { Agent, Router, AnthropicPort, OllamaPort, defaultTools } from "fein";
@@ -343,7 +343,7 @@ honesta de lo que sigue sin resolver.
 ## Pruebas y benchmark
 
 ```bash
-npm test               # 185 pruebas
+npm test               # 186 pruebas
 npm run bench          # offline, determinista, gratis — coste del mecanismo
 npm run bench:live     # modelos reales — la pregunta de la corrección
 ```
